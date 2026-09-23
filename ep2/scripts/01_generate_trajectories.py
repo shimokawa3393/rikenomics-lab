@@ -19,24 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy
 import mathutils
-from shots import (
-    SIGMA, RHO, BETA, DT, TOTAL_STEPS, EPSILON,
-    X0, Y0, Z0, SCALE, Z_OFFSET, WIP_BLEND,
-)
-
-
-def compute_trajectory(x0, y0, z0):
-    x, y, z = x0, y0, z0
-    points = []
-    for _ in range(TOTAL_STEPS):
-        dx = SIGMA * (y - x)
-        dy = x * (RHO - z) - y
-        dz = x * y - BETA * z
-        x += dx * DT
-        y += dy * DT
-        z += dz * DT
-        points.append((x * SCALE, y * SCALE, z * SCALE + Z_OFFSET))
-    return points
+from shots import EPSILON, X0, Y0, Z0, WIP_BLEND, compute_trajectory
 
 
 def build_curve_object(name, points, bevel_depth):
@@ -88,10 +71,16 @@ def build_glow_material(name, color_near, color_mid, color_far, strength):
     return mat
 
 
-def build_tip_marker(name, curve_obj, color, strength):
-    """軌跡の先端を示す発光点。Follow Pathでカーブ上の位置に正確に追従させる。
-    Stage 3で offset_factor をキーフレーム化し、bevel_factor_endと完全同期させる。"""
-    bpy.ops.mesh.primitive_ico_sphere_add(radius=0.06, subdivisions=2)
+def build_tip_marker(name, points, color, strength):
+    """軌跡の先端を示す発光点。
+
+    Follow Pathコンストレイントは使わない: bevel_factor_end('RESOLUTION'基準=頂点の
+    インデックス比率)と、Follow Pathのoffset_factor(Blender内部で弧長基準に再計算される)
+    は同じ0-1の値を入れても指す位置がズレる。そのため、球の座標は常にPython側で
+    points配列から直接計算し、bevel_factor_endと全く同じインデックス計算(point_at_reveal)
+    で位置決めする(Stage 3で使用)。このStageでは全長表示(points[-1])に置く。
+    """
+    bpy.ops.mesh.primitive_ico_sphere_add(radius=0.06, subdivisions=2, location=points[-1])
     marker = bpy.context.active_object
     marker.name = name
 
@@ -105,11 +94,6 @@ def build_tip_marker(name, curve_obj, color, strength):
     emission.inputs['Strength'].default_value = strength
     nt.links.new(emission.outputs[0], output.inputs[0])
     marker.data.materials.append(mat)
-
-    constraint = marker.constraints.new('FOLLOW_PATH')
-    constraint.target = curve_obj
-    constraint.use_fixed_location = True
-    constraint.offset_factor = 1.0  # このStageでは軌跡の末端に置く(全長表示のため)
     return marker
 
 
@@ -168,8 +152,8 @@ def main():
     # ------------------------------------------------------------
     # 3. 先端の発光点マーカー
     # ------------------------------------------------------------
-    build_tip_marker('TipMarkerA', curve_a, color=(0.4, 0.75, 1.0, 1), strength=15.0)
-    build_tip_marker('TipMarkerB', curve_b, color=(1.0, 0.8, 0.5, 1), strength=15.0)
+    build_tip_marker('TipMarkerA', points_a, color=(0.4, 0.75, 1.0, 1), strength=15.0)
+    build_tip_marker('TipMarkerB', points_b, color=(1.0, 0.8, 0.5, 1), strength=15.0)
 
     # ------------------------------------------------------------
     # 4. 保存

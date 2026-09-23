@@ -13,6 +13,8 @@ __pycache__/
 *.mp4
 ep1/*.mp40*.png
 ep1/Rikenomics_Episode01.mp4*.png
+# アニメーションレンダーが静止画ファイル名に連番を付加してしまう事故(ep1/ep2で発生)
+*.png[0-9][0-9][0-9][0-9].png
 
 # macOS
 .DS_Store
