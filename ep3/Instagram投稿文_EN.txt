@@ -13,5 +13,6 @@ The feeling of "going around" only exists relative to something we assume is sta
 *Orbital periods and the Sun's speed are real values. Only the spacing between orbits is schematic (evenly spaced).
 *Planet positions as of October 1, 2026.
 Planet textures: Solar System Scope (CC BY 4.0)
+Milky Way: NASA/Goddard Space Flight Center Scientific Visualization Studio (Deep Star Maps 2020; Gaia DR2: ESA/Gaia/DPAC)
 
 #solarsystem #milkyway #space #astronomy #science #funfacts #Rikenomics

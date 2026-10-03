@@ -13,5 +13,6 @@
 ※惑星の周期と太陽の速さは実測値。軌道の間隔のみ模式的（等間隔）に表示しています
 ※惑星の配置は2026年10月1日の実際の位置
 Planet textures: Solar System Scope (CC BY 4.0)
+Milky Way: NASA/Goddard Space Flight Center Scientific Visualization Studio (Deep Star Maps 2020; Gaia DR2: ESA/Gaia/DPAC)
 
 #太陽系 #天の川銀河 #宇宙 #天文学 #雑学 #豆知識 #Rikenomics

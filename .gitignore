@@ -21,3 +21,12 @@ ep1/Rikenomics_Episode01.mp4*.png
 
 # ep3のPNG連番(mp4の素材)
 ep3/frames/
+
+# 背景の全天マップ(約190MB)。再取得元: https://svs.gsfc.nasa.gov/4851 の milkyway_2020_8k_gal.exr と hiptyc_2020_16k_gal.exr
+ep3/textures/*.exr
+
+# ep4のPNG連番と交通流の計算のキャッシュ(スクリプトから再生成できる)
+ep4/frames/
+ep4/preview_frames/
+ep4/draft_frames/
+ep4/cache/

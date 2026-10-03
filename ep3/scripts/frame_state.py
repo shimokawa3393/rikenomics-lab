@@ -16,6 +16,7 @@
 軸に近いアングルは使わない。
 """
 import math
+import os
 
 import bpy
 import mathutils
@@ -38,28 +39,29 @@ from shots import (
 TRAIL_STRENGTH_DEFAULT = 3.0
 FADE_POWER_DEFAULT = 3.0  # 大きいほど後方が早く透けて消える
 
-BAND_HALF_WIDTH = 0.22  # 天の川の帯の太さ(方向ベクトルのz成分)
-BAND_STRENGTH = 0.16  # 長時間露光の天体写真程度の明るさ(位置・幅は実物通りに保つ)
-BULGE_STRENGTH = 0.5
-BULGE_POWER = 60.0  # 大きいほど銀河中心の光が小さくまとまる
-STAR_SCALE = 80.0  # 全天で約6千個。細かくしすぎると1ピクセル未満の点が並んで粒状ノイズに見える
-STAR_THRESHOLD = 0.04
-STAR_STRENGTH = 5.0
-DENSE_STAR_SCALE = 700.0  # 帯の中だけに散らす微光星(天の川の粒状感)
-DENSE_STAR_THRESHOLD = 0.05
-FAINT_STAR_SCALE = 170.0  # 空全体の微光星(約2万個)
-FAINT_STAR_THRESHOLD = 0.045
-FAINT_STAR_STRENGTH = 2.5
+# 背景はNASA SVS「Deep Star Maps 2020」(銀河座標版)。投稿文に「NASA/Goddard Space Flight Center
+# Scientific Visualization Studio」のクレジットを入れる。天の川(微光星の集まり)と明るい恒星が別画像なので、
+# 天の川だけを長時間露光の天体写真風に強調し、恒星はそのまま鋭く載せる。
+TEXTURE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "textures")
+MILKYWAY_EXR = os.path.join(TEXTURE_DIR, "milkyway_2020_8k_gal.exr")
+STARS_EXR = os.path.join(TEXTURE_DIR, "hiptyc_2020_16k_gal.exr")
+MILKYWAY_STRENGTH = 6.0  # 元画像は帯の平均が約0.02と暗い(肉眼相当)ので、天体写真程度まで持ち上げる
+MILKYWAY_GAMMA = 1.2  # 1より大きいほど淡い部分が沈み、暗黒帯のコントラストが立つ
+MILKYWAY_SATURATION = 1.15  # 元データはバルジ側が黄橙なので、上げすぎるとオレンジ一色になる
+# 明るさに応じた色味(天体写真風): 淡い所は青紫、中くらいはピンク寄り、明るい中心は暖かい白
+MILKYWAY_TINT = (
+    (0.0, (0.70, 0.72, 1.35)),
+    (0.08, (0.95, 0.75, 1.25)),
+    (0.35, (1.00, 0.92, 1.00)),
+)
+STAR_STRENGTH = 1.5
 
-
-def math_node(nodes, op, a=None, b=None):
-    n = nodes.new('ShaderNodeMath')
-    n.operation = op
-    if a is not None:
-        n.inputs[0].default_value = a
-    if b is not None:
-        n.inputs[1].default_value = b
-    return n
+def _sky_texture(nodes, links, vector, path):
+    tex = nodes.new('ShaderNodeTexEnvironment')
+    tex.image = bpy.data.images.load(path, check_existing=True)
+    tex.interpolation = 'Cubic'
+    links.new(vector, tex.inputs['Vector'])
+    return tex.outputs['Color']
 
 
 def build_world():
@@ -75,199 +77,58 @@ def build_world():
     background.inputs['Strength'].default_value = 1.0
     links.new(background.outputs[0], output.inputs[0])
 
+    # 銀河座標の正距円筒図は、BlenderではZ軸回りの回転なしだと銀経0°が+X、銀経90°が+Yに来る。
+    # シーンは銀河中心(銀経0°)が-Y、進行方向(銀経90°)が+Xなので、視線方向をZ軸回りに+90°回す。
     tex_coord = nodes.new('ShaderNodeTexCoord')
-    direction = tex_coord.outputs['Generated']  # ワールドでは視線方向ベクトル
-
-    # --- 恒星(ep1のVoronoi方式) ---
     mapping = nodes.new('ShaderNodeMapping')
-    mapping.inputs['Scale'].default_value = (STAR_SCALE,) * 3
-    voronoi = nodes.new('ShaderNodeTexVoronoi')
-    voronoi.voronoi_dimensions = '3D'
-    ramp = nodes.new('ShaderNodeValToRGB')
-    ramp.color_ramp.interpolation = 'CONSTANT'
-    ramp.color_ramp.elements[0].color = (1, 1, 1, 1)
-    ramp.color_ramp.elements[1].position = STAR_THRESHOLD
-    ramp.color_ramp.elements[1].color = (0, 0, 0, 1)
-    links.new(direction, mapping.inputs['Vector'])
-    links.new(mapping.outputs[0], voronoi.inputs['Vector'])
-    links.new(voronoi.outputs['Distance'], ramp.inputs['Fac'])
-    star_mask = ramp.outputs['Color']
+    mapping.inputs['Rotation'].default_value = (0.0, 0.0, math.radians(90))
+    links.new(tex_coord.outputs['Generated'], mapping.inputs['Vector'])
 
-    # --- 天の川の帯(銀河面=X-Y平面 → 方向ベクトルのzが0付近) ---
-    sep = nodes.new('ShaderNodeSeparateXYZ')
-    links.new(direction, sep.inputs[0])
-    abs_z = math_node(nodes, 'ABSOLUTE')
-    links.new(sep.outputs['Z'], abs_z.inputs[0])
-    band = nodes.new('ShaderNodeMapRange')
-    band.interpolation_type = 'SMOOTHERSTEP'
-    band.inputs['From Min'].default_value = 0.0
-    band.inputs['From Max'].default_value = BAND_HALF_WIDTH
-    band.inputs['To Min'].default_value = 1.0
-    band.inputs['To Max'].default_value = 0.0
-    links.new(abs_z.outputs[0], band.inputs['Value'])
+    milkyway = _sky_texture(nodes, links, mapping.outputs[0], MILKYWAY_EXR)
+    gain = nodes.new('ShaderNodeMix')
+    gain.data_type = 'RGBA'
+    gain.blend_type = 'MULTIPLY'
+    gain.inputs['Factor'].default_value = 1.0
+    gain.inputs['B'].default_value = (MILKYWAY_STRENGTH,) * 3 + (1,)
+    links.new(milkyway, gain.inputs['A'])
+    gamma = nodes.new('ShaderNodeGamma')
+    gamma.inputs['Gamma'].default_value = MILKYWAY_GAMMA
+    links.new(gain.outputs['Result'], gamma.inputs['Color'])
+    saturation = nodes.new('ShaderNodeHueSaturation')
+    saturation.inputs['Saturation'].default_value = MILKYWAY_SATURATION
+    links.new(gamma.outputs[0], saturation.inputs['Color'])
+    brightness = nodes.new('ShaderNodeRGBToBW')
+    links.new(saturation.outputs[0], brightness.inputs['Color'])
+    tint = nodes.new('ShaderNodeValToRGB')
+    elements = tint.color_ramp.elements
+    while len(elements) < len(MILKYWAY_TINT):
+        elements.new(0.5)
+    for element, (position, color) in zip(elements, MILKYWAY_TINT):
+        element.position = position
+        element.color = (*color, 1)
+    links.new(brightness.outputs[0], tint.inputs['Fac'])
+    tinted = nodes.new('ShaderNodeMix')
+    tinted.data_type = 'RGBA'
+    tinted.blend_type = 'MULTIPLY'
+    tinted.inputs['Factor'].default_value = 1.0
+    links.new(saturation.outputs[0], tinted.inputs['A'])
+    links.new(tint.outputs['Color'], tinted.inputs['B'])
 
-    # 帯のむら(星雲状の濃淡)と暗黒帯
-    cloud = nodes.new('ShaderNodeTexNoise')
-    cloud.inputs['Scale'].default_value = 7.0
-    cloud.inputs['Detail'].default_value = 15.0
-    cloud.inputs['Roughness'].default_value = 0.6
-    links.new(direction, cloud.inputs['Vector'])
-    cloud_contrast = nodes.new('ShaderNodeMapRange')
-    cloud_contrast.inputs['From Min'].default_value = 0.4
-    cloud_contrast.inputs['From Max'].default_value = 0.7
-    cloud_contrast.inputs['To Min'].default_value = 0.15
-    links.new(cloud.outputs['Fac'], cloud_contrast.inputs['Value'])
+    stars = _sky_texture(nodes, links, mapping.outputs[0], STARS_EXR)
+    star_gain = nodes.new('ShaderNodeMix')
+    star_gain.data_type = 'RGBA'
+    star_gain.blend_type = 'MULTIPLY'
+    star_gain.inputs['Factor'].default_value = 1.0
+    star_gain.inputs['B'].default_value = (STAR_STRENGTH,) * 3 + (1,)
+    links.new(stars, star_gain.inputs['A'])
 
-    # 暗黒帯: 銀河面に沿って横長に伸ばしたノイズを、帯の中心付近(|z|小)だけに効かせる
-    dust_mapping = nodes.new('ShaderNodeMapping')
-    dust_mapping.inputs['Scale'].default_value = (6.0, 6.0, 40.0)
-    links.new(direction, dust_mapping.inputs['Vector'])
-    dust = nodes.new('ShaderNodeTexNoise')
-    dust.inputs['Scale'].default_value = 1.0
-    dust.inputs['Detail'].default_value = 10.0
-    dust.inputs['Roughness'].default_value = 0.55
-    links.new(dust_mapping.outputs[0], dust.inputs['Vector'])
-    dust_dark = nodes.new('ShaderNodeMapRange')
-    dust_dark.inputs['From Min'].default_value = 0.45
-    dust_dark.inputs['From Max'].default_value = 0.65
-    dust_dark.inputs['To Min'].default_value = 0.0
-    dust_dark.inputs['To Max'].default_value = 0.9  # 暗くする量(0=なし)
-    links.new(dust.outputs['Fac'], dust_dark.inputs['Value'])
-    lane_center = nodes.new('ShaderNodeMapRange')
-    lane_center.interpolation_type = 'SMOOTHSTEP'
-    lane_center.inputs['From Min'].default_value = 0.0
-    lane_center.inputs['From Max'].default_value = 0.05
-    lane_center.inputs['To Min'].default_value = 1.0
-    lane_center.inputs['To Max'].default_value = 0.0
-    links.new(abs_z.outputs[0], lane_center.inputs['Value'])
-    dust_amount = math_node(nodes, 'MULTIPLY')
-    links.new(dust_dark.outputs[0], dust_amount.inputs[0])
-    links.new(lane_center.outputs[0], dust_amount.inputs[1])
-    dust_mask = math_node(nodes, 'SUBTRACT', a=1.0)  # 1 - 暗くする量
-    links.new(dust_amount.outputs[0], dust_mask.inputs[1])
-
-    band_density = math_node(nodes, 'MULTIPLY')
-    links.new(band.outputs[0], band_density.inputs[0])
-    links.new(cloud_contrast.outputs[0], band_density.inputs[1])
-    band_dusty = math_node(nodes, 'MULTIPLY')
-    links.new(band_density.outputs[0], band_dusty.inputs[0])
-    links.new(dust_mask.outputs[0], band_dusty.inputs[1])
-
-    # --- 銀河中心のバルジ(-Y方向) ---
-    dot = nodes.new('ShaderNodeVectorMath')
-    dot.operation = 'DOT_PRODUCT'
-    dot.inputs[1].default_value = (0.0, -1.0, 0.0)
-    links.new(direction, dot.inputs[0])
-    bulge_clamp = math_node(nodes, 'MAXIMUM', b=0.0)
-    links.new(dot.outputs['Value'], bulge_clamp.inputs[0])
-    bulge = math_node(nodes, 'POWER', b=BULGE_POWER)
-    links.new(bulge_clamp.outputs[0], bulge.inputs[0])
-    bulge_in_band = math_node(nodes, 'MULTIPLY')
-    links.new(bulge.outputs[0], bulge_in_band.inputs[0])
-    links.new(band.outputs[0], bulge_in_band.inputs[1])
-    bulge_dusty = math_node(nodes, 'MULTIPLY')
-    links.new(bulge_in_band.outputs[0], bulge_dusty.inputs[0])
-    links.new(dust_mask.outputs[0], bulge_dusty.inputs[1])
-
-    # --- 合成: 帯(淡い白) + バルジ(暖色) + 星(帯の中はやや多く見えるよう明るく) ---
-    band_color = nodes.new('ShaderNodeMix')
-    band_color.data_type = 'RGBA'
-    band_color.blend_type = 'MULTIPLY'
-    band_color.inputs['Factor'].default_value = 1.0
-    band_color.inputs['B'].default_value = (0.74 * BAND_STRENGTH, 0.82 * BAND_STRENGTH, 1.0 * BAND_STRENGTH, 1)
-    links.new(band_dusty.outputs[0], band_color.inputs['A'])
-
-    bulge_color = nodes.new('ShaderNodeMix')
-    bulge_color.data_type = 'RGBA'
-    bulge_color.blend_type = 'MULTIPLY'
-    bulge_color.inputs['Factor'].default_value = 1.0
-    bulge_color.inputs['B'].default_value = (1.0 * BULGE_STRENGTH, 0.68 * BULGE_STRENGTH, 0.36 * BULGE_STRENGTH, 1)
-    links.new(bulge_dusty.outputs[0], bulge_color.inputs['A'])
-
-    star_boost = math_node(nodes, 'MULTIPLY_ADD', b=3.0, )
-    star_boost.inputs[2].default_value = 2.5  # 帯の外=2.5、帯の中=5.5
-    links.new(band.outputs[0], star_boost.inputs[0])
-    # 星ごとの明るさのばらつき(Voronoiのセルごとの乱数色を使う)
-    star_random = nodes.new('ShaderNodeSeparateColor')
-    links.new(voronoi.outputs['Color'], star_random.inputs[0])
-    star_variation = math_node(nodes, 'MULTIPLY_ADD', b=1.2)
-    star_variation.inputs[2].default_value = 0.2  # 0.2〜1.4倍
-    links.new(star_random.outputs[0], star_variation.inputs[0])
-    star_varied = math_node(nodes, 'MULTIPLY')
-    links.new(star_boost.outputs[0], star_varied.inputs[0])
-    links.new(star_variation.outputs[0], star_varied.inputs[1])
-    star_gain = math_node(nodes, 'MULTIPLY', b=STAR_STRENGTH)
-    links.new(star_varied.outputs[0], star_gain.inputs[0])
-    stars = nodes.new('ShaderNodeMix')
-    stars.data_type = 'RGBA'
-    stars.blend_type = 'MULTIPLY'
-    stars.inputs['Factor'].default_value = 1.0
-    links.new(star_mask, stars.inputs['A'])
-    links.new(star_gain.outputs[0], stars.inputs['B'])
-
-    add1 = nodes.new('ShaderNodeMix')
-    add1.data_type = 'RGBA'
-    add1.blend_type = 'ADD'
-    add1.inputs['Factor'].default_value = 1.0
-    links.new(band_color.outputs['Result'], add1.inputs['A'])
-    links.new(bulge_color.outputs['Result'], add1.inputs['B'])
-    add2 = nodes.new('ShaderNodeMix')
-    add2.data_type = 'RGBA'
-    add2.blend_type = 'ADD'
-    add2.inputs['Factor'].default_value = 1.0
-    links.new(add1.outputs['Result'], add2.inputs['A'])
-    links.new(stars.outputs['Result'], add2.inputs['B'])
-
-    # 帯の中だけの微光星: 雲の濃い所ほど多く、暗黒帯では消える
-    dense_mapping = nodes.new('ShaderNodeMapping')
-    dense_mapping.inputs['Scale'].default_value = (DENSE_STAR_SCALE,) * 3
-    dense_voronoi = nodes.new('ShaderNodeTexVoronoi')
-    dense_voronoi.voronoi_dimensions = '3D'
-    dense_ramp = nodes.new('ShaderNodeValToRGB')
-    dense_ramp.color_ramp.interpolation = 'CONSTANT'
-    dense_ramp.color_ramp.elements[0].color = (1, 1, 1, 1)
-    dense_ramp.color_ramp.elements[1].position = DENSE_STAR_THRESHOLD
-    dense_ramp.color_ramp.elements[1].color = (0, 0, 0, 1)
-    links.new(direction, dense_mapping.inputs['Vector'])
-    links.new(dense_mapping.outputs[0], dense_voronoi.inputs['Vector'])
-    links.new(dense_voronoi.outputs['Distance'], dense_ramp.inputs['Fac'])
-    dense_amount = math_node(nodes, 'MULTIPLY', b=3.0)
-    links.new(band_dusty.outputs[0], dense_amount.inputs[0])
-    dense_stars = nodes.new('ShaderNodeMix')
-    dense_stars.data_type = 'RGBA'
-    dense_stars.blend_type = 'MULTIPLY'
-    dense_stars.inputs['Factor'].default_value = 1.0
-    links.new(dense_ramp.outputs['Color'], dense_stars.inputs['A'])
-    links.new(dense_amount.outputs[0], dense_stars.inputs['B'])
-
-    add3 = nodes.new('ShaderNodeMix')
-    add3.data_type = 'RGBA'
-    add3.blend_type = 'ADD'
-    add3.inputs['Factor'].default_value = 1.0
-    links.new(add2.outputs['Result'], add3.inputs['A'])
-    links.new(dense_stars.outputs['Result'], add3.inputs['B'])
-
-    # 空全体に散らばる微光星(帯の外も星が散りばめられて見えるように)
-    faint_mapping = nodes.new('ShaderNodeMapping')
-    faint_mapping.inputs['Scale'].default_value = (FAINT_STAR_SCALE,) * 3
-    faint_voronoi = nodes.new('ShaderNodeTexVoronoi')
-    faint_voronoi.voronoi_dimensions = '3D'
-    faint_ramp = nodes.new('ShaderNodeValToRGB')
-    faint_ramp.color_ramp.interpolation = 'CONSTANT'
-    faint_ramp.color_ramp.elements[0].color = (FAINT_STAR_STRENGTH,) * 3 + (1,)
-    faint_ramp.color_ramp.elements[1].position = FAINT_STAR_THRESHOLD
-    faint_ramp.color_ramp.elements[1].color = (0, 0, 0, 1)
-    links.new(direction, faint_mapping.inputs['Vector'])
-    links.new(faint_mapping.outputs[0], faint_voronoi.inputs['Vector'])
-    links.new(faint_voronoi.outputs['Distance'], faint_ramp.inputs['Fac'])
-    add4 = nodes.new('ShaderNodeMix')
-    add4.data_type = 'RGBA'
-    add4.blend_type = 'ADD'
-    add4.inputs['Factor'].default_value = 1.0
-    links.new(add3.outputs['Result'], add4.inputs['A'])
-    links.new(faint_ramp.outputs['Color'], add4.inputs['B'])
-    links.new(add4.outputs['Result'], background.inputs['Color'])
-
+    add = nodes.new('ShaderNodeMix')
+    add.data_type = 'RGBA'
+    add.blend_type = 'ADD'
+    add.inputs['Factor'].default_value = 1.0
+    links.new(tinted.outputs['Result'], add.inputs['A'])
+    links.new(star_gain.outputs['Result'], add.inputs['B'])
+    links.new(add.outputs['Result'], background.inputs['Color'])
 
 def build_compositor(scene):
     """Blender 5.x方式: ノードグループを明示作成し、Glareの種類はinputs["Type"]に文字列で指定。"""
@@ -329,7 +190,7 @@ def _camera_keys():
     # 縦型では軌跡が横に細長い帯になるため、画面を約40°回して斜めに流れる構図にする
     tilt = math.radians(40)
     pose_4a = ((-6, 48, -23), (-12, 0, 0), (-math.sin(tilt), 0, -math.cos(tilt)), 24)
-    return [
+    keys = [
         _key(1, *top0, 35),                                          # 1a: 教科書の俯瞰図
         _key(70, *top1, 35),
         _key(135, side_loc, side_target, _auto_up(side_loc, side_target), 24),  # 斜め上から: 右へ
@@ -340,6 +201,33 @@ def _camera_keys():
         _key(560, *pose_4a),                                          # 4a: 引いて全体を見せる
         _key(600, *pose_4a),
     ]
+    return _tame_acro(keys)
+
+
+ACRO_KEY_FRAMES = (185, 220, 255)  # アクロバット区間の途中キー(両端の135と335は動かさない)
+ACRO_INTENSITY = 0.8  # 途中キーの振れ幅。1.0=元の動き、0=両端を素直につないだ動き
+
+
+def _tame_acro(keys):
+    """アクロバット区間の途中キーを、両端のキーを素直につないだ基準の動きへACRO_INTENSITYの割合まで寄せる。
+    位置は線形補間、向きはクォータニオンのslerpで縮めるので、上方向が反転するような大回転でも破綻しない。"""
+    by_frame = {k[0]: k for k in keys}
+    a, b = by_frame[135], by_frame[335]
+    qa, qb = look_rotation(a[1], a[2], a[3]), look_rotation(b[1], b[2], b[3])
+    out = []
+    for k in keys:
+        if k[0] not in ACRO_KEY_FRAMES:
+            out.append(k)
+            continue
+        t = (k[0] - a[0]) / (b[0] - a[0])
+        base_loc = a[1].lerp(b[1], t)
+        loc = base_loc.lerp(k[1], ACRO_INTENSITY)
+        q = qa.slerp(qb, t).slerp(look_rotation(k[1], k[2], k[3]), ACRO_INTENSITY)
+        distance = (k[2] - k[1]).length
+        target = loc + q @ V((0, 0, -distance))
+        up = q @ V((0, 1, 0))
+        out.append((k[0], loc, target, up, k[4]))
+    return out
 
 
 def _catmull_rom(p0, p1, p2, p3, t):
