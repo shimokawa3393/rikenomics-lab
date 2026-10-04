@@ -30,3 +30,20 @@ ep4/frames/
 ep4/preview_frames/
 ep4/draft_frames/
 ep4/cache/
+
+# 画像・音楽・動画はGitHubに入れない(公開リポジトリのため。素材の出どころやプロンプトは文章で残し、
+# ファイルそのものはiCloud等にバックアップする)。2026-10-04から。それ以前のコミットの履歴には残っている
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.exr
+*.tif
+*.tiff
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.mov

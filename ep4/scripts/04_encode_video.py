@@ -25,7 +25,7 @@ from shots import DRAFT_FRAMES_DIR, FPS, FRAMES_DIR, PREVIEW_FRAMES_DIR, RESOLUT
 
 DRAFT_STEP = 2
 OUTPUT_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/Rikenomics_Episode04_Jam.mp4"
-AUDIO_PATH = None  # BGMができたら指定する
+AUDIO_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/Rikenomics_Episode04_mix.wav"  # 05_mix_audio.py で走行音とBGMを組んだもの
 LABEL_LOCATION = (0.07, 0.94)  # 倍率の文字の位置(画面に対する割合、左上)
 LABEL_FONT = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"  # VSEの標準フォントには「×」が無い
 
