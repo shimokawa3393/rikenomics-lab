@@ -1,0 +1,16 @@
+[Title]
+No accident, no roadwork. So why the traffic jam? #Shorts
+
+[Description]
+The cars at the front only slow from 61 to 45 km/h. But each car behind brakes a little harder, and the next one harder still, until the cars further back crawl along below 20 km/h.
+
+The cars keep moving forward, yet the jam grows backward at about 19 km/h. On real highways, jams are observed traveling backward at about 20 km/h.
+
+Leave a gap and slow down early and gently. That alone can weaken the wave traveling backward.
+
+[Behind the Phenomenon Series #4] Why Traffic Jams Happen
+
+*Computed with a traffic-flow model (IDM, 1 s reaction delay): 30 cars per km per lane, 3 lanes. In this video, cars slow slightly on an uphill too gentle to notice.
+*The video speeds up to 2x and 3x.
+
+#trafficjam #physics #science #Rikenomics

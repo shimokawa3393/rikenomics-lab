@@ -47,19 +47,21 @@ CAM_1A_FOCUS = 120.0  # m。手前の車と地平線がわずかにボケる
 CAM_1A_FSTOP = 11.0
 
 # 俯瞰(画面の上=進行方向): 上り坂の入口(y=250)を画面の上の方に置いて最初の波が生まれる様子を見せ、
-# 渋滞が後ろへ伸びるのに合わせて上空へ上がり、坂の手前の数百mを見渡す
+# 渋滞が後ろへ伸びるのに合わせて上がりつつ注視点を後ろへずらし、列の後ろの端を画面の下半分に置く
+# (後ろから来た白い点が列に加わって赤くなる瞬間を大きく見せる。上げすぎると点が小さくなり見えない)
 CAM_RISE = (120, 205)  # このフレームの間に1aの目線から俯瞰Aへ上昇する
 CAM_CLIMB = (420, 900)  # このフレームの間に俯瞰Aから上空の俯瞰Bへ上がる
 CAM_LANE_X = -7.2  # 我々の3車線の中央
 CAM_A = dict(target_y=200.0, back=100.0, height=115.0, lens=30.0)
-CAM_B = dict(target_y=30.0, back=260.0, height=430.0, lens=28.0)
+CAM_B = dict(target_y=60.0, back=120.0, height=240.0, lens=28.0)
 CAM_OVERHEAD_FSTOP = 22.0
 DOT_GROW = 0.3  # カメラが高くなるほど光の点を大きくする(高さが俯瞰Aの何倍になったかに対する割合)
 
 # 記号表現への切り替え(上昇の途中)
 SYMBOLIC = (150, 205)
 DOT_STRENGTH = 6.0
-LAMP_DIM = 0.85  # 記号表現では街灯をこの割合だけ暗くする(道路の形は残す)
+LAMP_OVERHEAD = 2.5  # 記号表現では街灯が地面を照らす光をこの倍率にする(上空からだと光の輪が小さく、道路が見えず寂しい)。
+# 街灯の頭(光る点)は明るくしない(車の光の点とまぎれる)
 
 # 写真の質感(コンポジット)
 CHROMATIC_DISPERSION = 0.006  # レンズの色ずれ(画面の端ほど赤と青がずれる)
@@ -288,17 +290,11 @@ def apply_cars(frame):
 
 
 def apply_lamps(frame):
-    """記号表現では街灯を暗くする(道路の形は残す)。"""
-    dim = 1.0 - LAMP_DIM * symbolic_amount(frame)
+    """記号表現では街灯が地面を照らす光を強める(俯瞰でも道路が見えるように)。"""
+    boost = 1.0 + (LAMP_OVERHEAD - 1.0) * symbolic_amount(frame)
     for obj in bpy.data.objects:
         if obj.type == 'LIGHT' and obj.name.startswith("LampLight_"):
-            obj.data.energy = obj.data["base_power"] * dim
-    head = bpy.data.materials.get("LampHead")
-    if head is not None:
-        em = next(n for n in head.node_tree.nodes if n.type == 'EMISSION')
-        if "base_strength" not in head:
-            head["base_strength"] = em.inputs['Strength'].default_value
-        em.inputs['Strength'].default_value = head["base_strength"] * dim
+            obj.data.energy = obj.data["base_power"] * boost
 
 
 def apply_frame(scene, frame):

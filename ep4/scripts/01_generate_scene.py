@@ -51,7 +51,8 @@ LAMP_HEAD_STRENGTH = 60.0
 LAMP_LIGHT_POWER = 4500.0  # W。手前の街灯だけ本物のスポットライトにする
 # 腕の形(支柱からの横距離, 支柱の高さLAMP_HEIGHTからの高さ)。支柱から曲線で立ち上がって水平に伸びる
 LAMP_ARM = [(0.0, -1.2), (0.15, -0.6), (0.5, -0.2), (1.1, 0.0), (2.9, 0.0)]
-LIT_LAMPS = 32  # 本物のライトにする街灯の数(道路の始点から)。奥は発光だけ
+LIT_LAMPS = 41  # 本物のライトにする街灯の数(LIT_FROMから前へ)。奥は発光だけ
+LIT_FROM = -420.0  # 最後の俯瞰は列の後ろの端(y=約-40)を画面の下に置くので、その後ろも照らす
 TAIL_COLOR = (1.0, 0.015, 0.008)
 TAIL_STRENGTH = 10.0
 HEAD_COLOR = (1.0, 0.93, 0.82)
@@ -263,8 +264,8 @@ def build_lamps(col):
         y += LAMP_SPACING
     mesh_object("Lamps", bm, [pole_mat, head_mat], col)
 
-    # 本物のライトにするのは、1aのカメラ(y=0)の少し後ろから前の街灯だけ(道路はカメラの後ろへも延びている)
-    for i, y in enumerate([y for y in lamp_ys if y > -60.0][:LIT_LAMPS]):
+    # 本物のライトにするのは、最後の俯瞰に映る範囲から前の街灯だけ(道路はさらに後ろへも延びている)
+    for i, y in enumerate([y for y in lamp_ys if y > LIT_FROM][:LIT_LAMPS]):
         for side in (-1, 1):
             data = bpy.data.lights.new(f"LampLight_{i:02d}_{side:+d}", 'SPOT')
             data.color = SODIUM
