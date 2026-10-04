@@ -3,7 +3,7 @@
 Stage 4: PNG連番をmp4にまとめる(このマシンにffmpegは無いので、BlenderのVSE経由で書き出す)
 
 - 画面の左、真ん中より少し下に映像のスピード(×2、×3)を文字で重ねる(左上だとテロップや各アプリのボタンとかぶる)
-- telop を付けると、テロップ(数字なしの短い補助。ep4/テロップ.txt)を画面の上の方に重ねた投稿用の版を書き出す
+- telop を付けると、テロップ(数字なしの短い補助。ep4/txt/テロップ.txt)を画面の上の方に重ねた投稿用の版を書き出す
   (en を付けると英語。テロップ入りもテロップなしと同じ最高画質。ユーザー「画質が落ちるなら、テロップ入りはいい」)
 
 Blender 5.x: FFMPEG出力の前にimage_settings.media_type='VIDEO'が必要、VSEは.strips(ep2の教訓)。
@@ -27,8 +27,9 @@ import scenario
 from shots import DRAFT_FRAMES_DIR, FPS, FRAMES_DIR, PREVIEW_FRAMES_DIR, RESOLUTION, STILLCHECK_DIR, TOTAL_FRAMES
 
 DRAFT_STEP = 2
-OUTPUT_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/Rikenomics_Episode04_Jam.mp4"
-AUDIO_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/Rikenomics_Episode04_mix.wav"  # 05_mix_audio.py で走行音とBGMを組んだもの
+OUTPUT_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/mp4/final/Rikenomics_Episode04_Jam.mp4"
+PREVIEW_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep4/mp4/preview"  # draft・preview・share(確認用)はこちらへ
+AUDIO_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep4/wav/Rikenomics_Episode04_mix.wav"  # 05_mix_audio.py で走行音とBGMを組んだもの
 SHOW_SPEED_LABEL = False  # 台数の計器とテロップで情報が増え「倍速表示もいらない」。倍速は投稿文の注記に書く
 LABEL_LOCATION = (0.12, 0.83)  # 倍率の文字の位置(画面に対する割合、下から。左上、説明テロップの下)。
 # 最初は左の真ん中より少し下だったが、台数の計器と並べると情報がまとまりすぎるので分けた
@@ -149,6 +150,8 @@ def main():
         output_path = output_path.replace(".mp4", "_telop.mp4" if telop_lang == "ja" else "_telop_EN.mp4")
         if "share" in argv:
             output_path = output_path.replace(".mp4", "_share.mp4")
+    if draft or preview or "share" in argv:
+        output_path = os.path.join(PREVIEW_DIR, os.path.basename(output_path))
 
     bpy.ops.wm.read_homefile(use_empty=True)
     scene = bpy.context.scene

@@ -68,4 +68,4 @@ def total_frame_end():
 
 
 SOURCE_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep1/スパゲティー没.blend"
-WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep1/Rikenomics_Episode01_WIP.blend"
+WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep1/blend/Rikenomics_Episode01_WIP.blend"

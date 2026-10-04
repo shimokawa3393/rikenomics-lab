@@ -19,9 +19,9 @@ import wave
 import numpy as np
 
 EP4 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TRAFFIC_PATH = os.path.join(EP4, "constant-highway-traffic-noise-as_100426.mp3")
-BGM_PATH = os.path.join(EP4, "instrumental-electronic-track-exactly-30_100426.mp3")  # 1曲目(minimal-...)は盛り上がらず不採用
-OUTPUT_PATH = os.path.join(EP4, "Rikenomics_Episode04_mix.wav")
+TRAFFIC_PATH = os.path.join(EP4, "mp3", "constant-highway-traffic-noise-as_100426.mp3")
+BGM_PATH = os.path.join(EP4, "mp3", "instrumental-electronic-track-exactly-30_100426.mp3")  # 1曲目(minimal-...)は盛り上がらず不採用
+OUTPUT_PATH = os.path.join(EP4, "wav", "Rikenomics_Episode04_mix.wav")
 
 SR = 44100
 DURATION = 30.0

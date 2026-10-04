@@ -17,7 +17,7 @@ SHOT_FRAMES = {
     "3": (421, 900),  # 止まる場所が後ろへずれていく。3倍(途中で別の計算に切り替えず、最後まで流す)
 }
 
-WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep4/Rikenomics_Episode04_WIP.blend"
+WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep4/blend/Rikenomics_Episode04_WIP.blend"
 STILLCHECK_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep4/stillcheck"
 # 連番の置き場所。それぞれの下に real(リアルな1画面)・top(上の画面)・bottom(下の画面)を作る
 FRAMES_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep4/frames"

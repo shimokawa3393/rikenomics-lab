@@ -95,7 +95,7 @@ X0, Y0, Z0 = 0.1, 0.0, 0.0
 SCALE = 0.12
 Z_OFFSET = -3.0
 
-WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep2/Rikenomics_Episode02_WIP.blend"
+WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep2/blend/Rikenomics_Episode02_WIP.blend"
 STILLCHECK_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep2/stillcheck"
 
 

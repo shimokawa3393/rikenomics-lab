@@ -1,5 +1,0 @@
-1〜6秒     なぜ渋滞は起きる？              / Why do traffic jams happen?
-7〜13秒    前が少し遅くなっただけ          / The cars ahead just slowed a little
-14〜21秒   渋滞は後ろへ伸びていく          / The jam grows backward
-22〜30秒   まだまだ長くなっていく…        / And it's only getting longer...
-(各0.4秒でフェードイン・フェードアウト。次の1秒前に消してワンテンポ置き、次は映像の変わり目ちょうどに出す)

@@ -17,9 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpy
 from shots import FPS, FRAMES_DIR, RESOLUTION, TOTAL_FRAMES
 
-OUTPUT_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/Rikenomics_Episode03_Spiral.mp4"
-PREVIEW_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/Rikenomics_Episode03_Spiral_preview.mp4"
-AUDIO_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/epic-cinematic-orchestral-hybrid-instrumental_092726.mp3"  # 曲側でフェードアウト済み
+OUTPUT_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/mp4/final/Rikenomics_Episode03_Spiral.mp4"
+PREVIEW_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/mp4/preview/Rikenomics_Episode03_Spiral_preview.mp4"
+AUDIO_PATH = "/Users/shouheishimokawa/rikenomics-lab/ep3/mp3/epic-cinematic-orchestral-hybrid-instrumental_092726.mp3"  # 曲側でフェードアウト済み
 
 
 def main():
@@ -33,7 +33,7 @@ def main():
         i = argv.index("--range")
         first, last = int(argv[i + 1]), int(argv[i + 2])
         preview = True
-        output_path = OUTPUT_PATH.replace(".mp4", f"_clip_{first:04d}-{last:04d}.mp4")
+        output_path = PREVIEW_PATH.replace("_preview.mp4", f"_clip_{first:04d}-{last:04d}.mp4")
     bpy.ops.wm.read_homefile(use_empty=True)
     scene = bpy.context.scene
     scene.render.fps = FPS

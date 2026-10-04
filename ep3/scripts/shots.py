@@ -73,7 +73,7 @@ GAL_Y_EQ = (0.4941094279, -0.4448296300, 0.7469822445)  # 銀河回転方向(l=9
 GAL_Z_EQ = (-0.8676661490, -0.1980763734, 0.4559837762)  # 銀河北極
 OBLIQUITY_DEG = 23.43928  # J2000の黄道傾斜角
 
-WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep3/Rikenomics_Episode03_WIP.blend"
+WIP_BLEND = "/Users/shouheishimokawa/rikenomics-lab/ep3/blend/Rikenomics_Episode03_WIP.blend"
 STILLCHECK_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep3/stillcheck"
 FRAMES_DIR = "/Users/shouheishimokawa/rikenomics-lab/ep3/frames"
 RESOLUTION = (1080, 1920)  # 縦型(9:16、SNSリール向け)
