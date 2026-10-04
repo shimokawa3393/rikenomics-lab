@@ -39,6 +39,7 @@ ep4/cache/
 *.gif
 *.webp
 *.exr
+*.hdr
 *.tif
 *.tiff
 *.mp3
