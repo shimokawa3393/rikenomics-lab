@@ -63,6 +63,11 @@ ASPHALT_ROUGHNESS = (0.22, 0.5)  # 低いほど光が路面に映り込む(乾�
 # テールランプ: 後ろ向き・少し下向きの赤いスポット。路面と後ろの車を照らす
 TAIL_GLOW_POWER = 20.0  # W。ブレーキ中はBRAKE_BOOST倍
 TAIL_GLOW_DISTANCE = 14.0  # m。光の届く上限(すぐ後ろの車と路面だけを照らし、計算も軽くする)
+# 水平に向けて広がりを絞り、後ろの車の前の面だけを照らす。広がり150度・斜め下向きだと、車のすぐ後ろ(0.5〜2m)の路面が
+# 距離の2乗で後ろの車より100倍以上明るく照らされ、丸い赤い跡が「バックフォグが光ってるように」見えた。
+# 向きだけ水平にしても、広がりの下の端が近くの路面に当たるので消えない。広がり20度なら路面に当たるのは約4m先から
+TAIL_GLOW_TILT = 0.0  # 後ろ向きの水平からの傾き(下向きが負)。旧-0.35
+TAIL_GLOW_SPREAD = 20.0  # 度。旧150
 # 対向車のヘッドライト: 前向き・下向きのスポット。路面に光が伸びる
 HEAD_BEAM_POWER = 900.0
 HEAD_BEAM_DISTANCE = 70.0
@@ -400,6 +405,9 @@ CAR_SHAPES = {
 }
 
 
+SIDE_GLASS_BOTTOM = 0.04  # 窓の下端(beltからの高さ)
+
+
 def car_mesh(name, kind, materials):
     """マテリアル: 0車体 1窓 2下回り・タイヤ 3テール 4ヘッド。ローカルの前方が+Y、原点は後端の路面。"""
     shape = CAR_SHAPES[kind]
@@ -417,7 +425,11 @@ def car_mesh(name, kind, materials):
     ret = bmesh.ops.extrude_face_region(bm, geom=[face])
     right = [g for g in ret['geom'] if isinstance(g, bmesh.types.BMVert)]
     bmesh.ops.translate(bm, vec=(width, 0, 0), verts=right)
-    body_verts = left + right
+    # 横の面はシルエット全体で1枚(中心が窓より下)なので、そのままだと横の窓が塗られない。窓の高さで水平に切り分ける
+    body_geom = [f for f in bm.faces if f not in before]
+    body_geom += list({e for f in body_geom for e in f.edges}) + list({v for f in body_geom for v in f.verts})
+    bmesh.ops.bisect_plane(bm, geom=body_geom, plane_co=(0, 0, belt + SIDE_GLASS_BOTTOM), plane_no=(0, 0, 1))
+    body_verts = list({v for f in bm.faces if f not in before for v in f.verts})
     for v in body_verts:  # beltより上を、屋根に向かってなめらかにすぼめる
         if v.co.z > belt:
             t = (v.co.z - belt) / (roof - belt)
@@ -430,7 +442,7 @@ def car_mesh(name, kind, materials):
         if f in before:
             continue
         c = f.calc_center_median()
-        is_glass = belt + 0.04 < c.z < roof - 0.03 and abs(f.normal.z) < 0.9
+        is_glass = belt + SIDE_GLASS_BOTTOM - 0.01 < c.z < roof - 0.03 and abs(f.normal.z) < 0.9
         f.material_index = 1 if is_glass else 0
 
     for side in (-1, 1):  # ランプは車体の面に沿った薄い板
@@ -481,7 +493,7 @@ def add_tail_glow(car, kind, col):
     data.color = TAIL_COLOR
     data.energy = TAIL_GLOW_POWER
     data["base_power"] = TAIL_GLOW_POWER  # frame_stateがブレーキの強さに応じて倍率を掛ける
-    data.spot_size = math.radians(150)
+    data.spot_size = math.radians(TAIL_GLOW_SPREAD)
     data.spot_blend = 1.0
     data.shadow_soft_size = 0.25
     data.use_shadow = False
@@ -490,7 +502,7 @@ def add_tail_glow(car, kind, col):
     obj = link(bpy.data.objects.new(data.name, data), col)
     obj.parent = car
     obj.location = (0, -0.15, 0.75 if kind == "truck" else CAR_SHAPES.get(kind, CAR_SHAPES["sedan"])["tail_z"])
-    aim(obj, (0, -1, -0.35))
+    aim(obj, (0, -1, TAIL_GLOW_TILT))
     return obj
 
 

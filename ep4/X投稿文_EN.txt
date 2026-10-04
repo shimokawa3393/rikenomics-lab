@@ -8,5 +8,5 @@ The cars move forward, but the jam grows backward at ~19 km/h.
 #trafficjam #physics #Rikenomics
 
 [Reply (notes)]
-*Computed with a traffic-flow model (IDM, 1 s reaction delay): 30 cars per km per lane, 3 lanes. In this video, cars slow slightly on an uphill too gentle to notice.
-*The video speeds up to 2x and 3x.
+*Traffic-flow model (IDM, 1 s reaction delay), 30 cars/km per lane, 3 lanes. Cars slow slightly on an uphill too gentle to notice.
+*The video speeds up to 2x and 3x. On-screen count: cars below 20 km/h, all 3 lanes.

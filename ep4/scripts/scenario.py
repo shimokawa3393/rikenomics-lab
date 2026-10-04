@@ -154,3 +154,34 @@ def oncoming_y(y0, t):
     """対向車(-Y方向へ一定速度)。道路の範囲で周期的に回す。"""
     span = ROAD_END - ROAD_START
     return (y0 - ONCOMING_SPEED * t - ROAD_START) % span + ROAD_START
+
+
+# ============================================================
+# ノロノロ運転の車の台数(画面に数字で出す)
+# ============================================================
+# 最初は渋滞の「長さ」を出したが、見た目より長く感じた(「実際の列より数値が大きく感じる」)。時速40km以下だと、ほぼ白に
+# 見える薄いオレンジの点まで数えていた。基準を下げると、一番赤い塊は渋滞の波として坂から後ろへ離れていくので、
+# 「どこからどこまでを列と呼ぶか」で長さがいくらでも変わる。画面で赤〜オレンジに見える点そのものの台数にした
+SLOW_SPEED = 20 * KMH  # 光の点の色で赤〜オレンジに見える速さ(DOT_COLORS: 0km/hで赤、12km/hでオレンジ、40km/hでほぼ白)
+SLOW_SMOOTH = 4.0  # 計算上の秒。前後の平均で、1台ずつの出入りによる数字のちらつきをならす(この筋書きでは一度も減らない)
+_SLOW_STEP = 0.25
+_slow_curve = None
+
+
+def slow_car_count(lanes, t):
+    """道路の上の、時速SLOW_SPEEDより遅い車の台数(3車線の合計)。"""
+    global _slow_curve
+    if _slow_curve is None:
+        ts = np.arange(0.0, sim_time(TOTAL_FRAMES) + _SLOW_STEP, _SLOW_STEP)
+        raw = []
+        for x in ts:
+            n = 0
+            for lane in lanes:
+                y, v, _ = lane_state(lane, x)
+                n += int(((v < SLOW_SPEED) & (y > ROAD_START) & (y < ROAD_END)).sum())
+            raw.append(n)
+        raw = np.array(raw, float)
+        k = int(SLOW_SMOOTH / _SLOW_STEP) // 2
+        _slow_curve = (ts, np.array([raw[max(0, i - k):i + k + 1].mean() for i in range(len(raw))]))
+    ts, curve = _slow_curve
+    return float(np.interp(t, ts, curve))

@@ -15,6 +15,6 @@ Leave a gap and slow down early and gently. That alone can weaken the wave trave
 [Behind the Phenomenon Series #4] Why Traffic Jams Happen
 
 *Computed with a traffic-flow model (IDM, 1 s reaction delay): 30 cars per km per lane, 3 lanes. In this video, cars slow slightly on an uphill too gentle to notice.
-*The video speeds up to 2x and 3x.
+*The video speeds up to 2x and 3x. On-screen count: cars below 20 km/h, all 3 lanes.
 
 #trafficjam #physics #science #Rikenomics
