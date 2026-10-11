@@ -4,7 +4,7 @@ Stage 2: 静止画チェック(指定フレームだけを半分の解像度で�
 
 実行:
   /Applications/Blender.app/Contents/MacOS/Blender --background --python "ep5/scripts/02_stillcheck_render.py" -- 1
-  (full を付けると本番の解像度。clear を付けると雨なし・明るい曇り空で車の形を見る)
+  (full を付けると本番の解像度。clear を付けると雨なし・明るい曇り空で車の形を見る。science を付けると暗く色を抜いて電流の筋を出す)
 """
 import os
 import sys
@@ -13,7 +13,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy
-from frame_state import apply_frame, setup_render
+from frame_state import apply_frame, apply_science, setup_render
 from shots import STILLCHECK_DIR, WIP_BLEND
 
 
@@ -21,6 +21,7 @@ def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     full = "full" in argv
     clear = "clear" in argv
+    science = "science" in argv  # 科学の目の時間(暗く色を抜き、電流の筋を出す)の見た目を確かめる
     frames = [int(a) for a in argv if a.isdigit()] or [1]
     bpy.ops.wm.open_mainfile(filepath=WIP_BLEND)
     scene = bpy.context.scene
@@ -28,7 +29,10 @@ def main():
     os.makedirs(STILLCHECK_DIR, exist_ok=True)
     for frame in frames:
         apply_frame(scene, frame)
-        path = os.path.join(STILLCHECK_DIR, f"ep5_frame_{frame:04d}{'_clear' if clear else ''}{'_full' if full else ''}.png")
+        if science:
+            apply_science(scene, 1.0, 1.0)
+        path = os.path.join(STILLCHECK_DIR, f"ep5_frame_{frame:04d}{'_clear' if clear else ''}{'_science' if science else ''}"
+                                            f"{'_full' if full else ''}.png")
         scene.render.filepath = path
         t0 = time.time()
         bpy.ops.render.render(write_still=True)

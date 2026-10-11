@@ -108,7 +108,22 @@ def build_compositor(scene, clear=False):
     glare.inputs['Threshold'].default_value = 1.0
     glare.inputs['Size'].default_value = 0.7
     glare.inputs['Strength'].default_value = 1.0
-    ng.links.new(haze.outputs['Result'], glare.inputs['Image'])
+    science = ng.nodes.new('CompositorNodeHueSat')  # 科学の目で見る時間: 色を抜いて暗く(apply_scienceで動かす)
+    science.name = "Science"
+    science.inputs['Saturation'].default_value = 1.0
+    science.inputs['Value'].default_value = 1.0
+    ng.links.new(haze.outputs['Result'], science.inputs['Image'])
+    lines_pass = ng.nodes.new('CompositorNodeRLayers')  # 光の筋は色を抜かずに上から足す(別のビューレイヤー)
+    lines_pass.name = "LinesPass"
+    lines_pass.layer = "Lines" if "Lines" in scene.view_layers else scene.view_layers[0].name
+    add = ng.nodes.new('ShaderNodeMix')
+    add.data_type = 'RGBA'
+    add.blend_type = 'ADD'
+    add.name = "LinesAdd"
+    add.inputs['Factor'].default_value = 1.0 if "Lines" in scene.view_layers else 0.0
+    ng.links.new(science.outputs['Image'], add.inputs['A'])
+    ng.links.new(lines_pass.outputs['Image'], add.inputs['B'])
+    ng.links.new(add.outputs['Result'], glare.inputs['Image'])
     lens = ng.nodes.new('CompositorNodeLensdist')
     lens.inputs['Dispersion'].default_value = CHROMATIC_DISPERSION
     ng.links.new(glare.outputs['Image'], lens.inputs['Image'])
@@ -195,6 +210,25 @@ def animate_rain(frame):
     me.update()
 
 
+SCIENCE_SATURATION = 0.15  # 科学の目の時間の彩度
+SCIENCE_VALUE = 0.35  # 科学の目の時間の明るさ
+CURRENT_STRENGTH = 8.0  # 電流の筋の光の強さ(強いとにじんで太い帯になる)
+
+
+def apply_science(scene, amount, lines=0.0):
+    """科学の目で見る時間: amount(0〜1)で画面の色を抜いて暗くし、lines(0〜1)で電流の筋を出す。"""
+    node = scene.compositing_node_group.nodes.get("Science")
+    if node is not None:
+        node.inputs['Saturation'].default_value = 1.0 + (SCIENCE_SATURATION - 1.0) * amount
+        node.inputs['Value'].default_value = 1.0 + (SCIENCE_VALUE - 1.0) * amount
+    col = bpy.data.collections.get("CurrentLines")
+    if col is not None:
+        col.hide_render = lines <= 0.0
+        mat = bpy.data.materials.get("CurrentLine")
+        if mat is not None:
+            mat.node_tree.nodes["Emission"].inputs['Strength'].default_value = CURRENT_STRENGTH * lines
+
+
 def apply_frame(scene, frame):
     animate_rain(frame)
     grain = scene.compositing_node_group.nodes.get("GrainNoise")
@@ -204,9 +238,25 @@ def apply_frame(scene, frame):
     scene.frame_set(frame)
 
 
+def setup_lines_layer(scene):
+    """電流の筋だけを描く2つ目のビューレイヤー「Lines」(色を抜いた画面の上に、色のまま足すため)。
+    車は隠す側(ホールドアウト)にして、車の裏側の筋は見えないようにする。メインのレイヤーからは筋を外す。"""
+    if bpy.data.collections.get("CurrentLines") is None:
+        return
+    main = scene.view_layers[0]
+    lines = scene.view_layers.get("Lines") or scene.view_layers.new("Lines")
+    for lc in main.layer_collection.children:
+        lc.exclude = lc.name == "CurrentLines"
+    for lc in lines.layer_collection.children:
+        lc.exclude = lc.name not in ("CurrentLines", "Car")
+        lc.holdout = lc.name == "Car"
+    lines.use_pass_mist = False
+
+
 def setup_render(scene, resolution_percentage=100, clear=False):
     """clear: 車の形を見るための確認用(雨なし、明るい曇り空)。"""
     build_world(clear)
+    setup_lines_layer(scene)
     rain = bpy.data.collections.get("Rain")
     if rain is not None:
         rain.hide_render = clear

@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bmesh
 import bpy
+import numpy as np
 import mathutils
 from mathutils import noise
 from mathutils.bvhtree import BVHTree
@@ -1075,6 +1076,51 @@ def build_lightning(col, rng):
     col.hide_render = True
 
 
+CURRENT_LINES = os.path.join(os.path.dirname(WIP_BLEND), "..", "cache", "current_lines.npz")
+CURRENT_COLOR = (0.35, 0.80, 1.0)  # 電流の筋の色(参考画像3の青白い光)
+
+
+def build_current_lines(col, body):
+    """電流の光の筋(03d_current_lines.py で計算した流線)。ボディの表面から少し浮かせた細い光る管。
+    1本の筋が同じ量の電流を運ぶので、筋の密度=電流の多さ。ふだんは隠し、frame_stateで出す。"""
+    if not os.path.exists(CURRENT_LINES):
+        print("[Stage1] current lines: no cache (run 03b/03d)")
+        return
+    mat = bpy.data.materials.new("CurrentLine")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.name = "Emission"
+    em.inputs['Color'].default_value = (*CURRENT_COLOR, 1)
+    em.inputs['Strength'].default_value = 25.0
+    nt.links.new(em.outputs[0], nt.nodes.new('ShaderNodeOutputMaterial').inputs[0])
+    # 表面の法線を引くためのBVH(ワールド座標)
+    bm = bmesh.new()
+    bm.from_mesh(body.data)
+    bm.transform(body.matrix_world)
+    bvh = BVHTree.FromBMesh(bm)
+    bm.free()
+    data = np.load(CURRENT_LINES)
+    cu = bpy.data.curves.new("CurrentLines", 'CURVE')
+    cu.dimensions = '3D'
+    cu.bevel_depth = 0.0025
+    cu.bevel_resolution = 2
+    for k in data.files:
+        pts = data[k][::2]
+        sp = cu.splines.new('POLY')
+        sp.points.add(len(pts) - 1)
+        for i, p in enumerate(pts):
+            loc, n, _, _ = bvh.find_nearest(V(p))
+            q = V(p) + n * 0.006 if loc is not None else V(p)  # 表面に埋もれないよう6mm浮かせる
+            sp.points[i].co = (*q, 1.0)
+    cu.materials.append(mat)
+    obj = link(bpy.data.objects.new("CurrentLines", cu), col)
+    obj.visible_shadow = False
+    col.hide_render = True
+    print("[Stage1] current lines:", len(data.files))
+
+
 def build_rain(col, rng):
     """雨の筋: カメラの前の空間に、細長い板を散らす。遠くでも1画素ほどの幅は残す。少し風で傾ける。"""
     mat = bpy.data.materials.new("Rain")
@@ -1144,6 +1190,8 @@ def main():
     build_camera(collection("Camera"))
     build_rain(collection("Rain"), rng)
     build_lightning(collection("Lightning"), rng)
+    bpy.context.view_layer.update()
+    build_current_lines(collection("CurrentLines"), bpy.data.objects["CarBody"])
     # 映り込み用のプローブ: 無いと車体の下半分にも空が映って白く飛ぶ(地面の暗さを拾わせる)
     probe = bpy.data.lightprobes.new("CarReflection", 'SPHERE')
     probe.influence_distance = 12.0

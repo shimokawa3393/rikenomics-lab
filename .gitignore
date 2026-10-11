@@ -48,3 +48,7 @@ ep4/cache/
 *.aac
 *.flac
 *.mov
+
+# ep5の計算のキャッシュ(スクリプトから再生成できる)
+ep5/cache/
+ep5/preview_frames/
