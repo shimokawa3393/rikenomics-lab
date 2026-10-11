@@ -28,29 +28,30 @@ SKY_HDRI = os.path.join(TEXTURE_DIR, "overcast_soil_puresky_8k.hdr")  # Poly Hav
 ASPHALT = {k: os.path.join(TEXTURE_DIR, f"asphalt_01_{k}_2k.jpg") for k in ("diff", "rough", "nor_gl")}  # Poly Haven(CC0)
 
 # --- 車(セダン)。横から見た形: 後端 y=0 → 前端 y=LENGTH、z=高さ ---
-CAR_LENGTH = 4.70
+CAR_LENGTH = 4.78
 CAR_WIDTH = 1.80
-CAR_PROFILE = [  # 売れるセダン: 低い屋根、寝かせたフロント・リアガラス、短いトランク(ファストバック寄り)
-    (0.00, 0.26), (0.00, 0.78), (0.12, 0.95), (0.60, 0.99), (1.35, 1.38), (2.75, 1.43),
-    (3.55, 0.99), (4.42, 0.88), (4.62, 0.82), (4.72, 0.68), (4.75, 0.44), (4.68, 0.24),
+CAR_PROFILE = [  # 今のセダン(参考画像)。重厚感: 高く厚い鼻先と水平に近いボンネット、高いベルトライン、短く高いトランク
+    (0.05, 0.26), (0.00, 0.46), (0.00, 0.86), (0.10, 1.01), (0.45, 1.05), (1.45, 1.41), (2.55, 1.45),
+    (3.45, 1.04), (4.30, 0.95), (4.60, 0.89), (4.74, 0.78), (4.78, 0.50), (4.70, 0.24),
 ]
 ROOF_Z = max(z for _, z in CAR_PROFILE)
-BELT = 1.00  # 窓の下端の線(ベルトライン)
+BELT = 1.04  # 窓の下端の線(ベルトライン)
 ROOF_TAPER = 0.80  # 屋根の幅は、ベルトラインの幅のこの割合(タンブルホーム)
-NOSE_TAPER = 0.80  # 前後の端の幅は、真ん中の幅のこの割合(上から見たすぼまり)
+NOSE_TAPER = 0.86  # 前後の端の幅は、真ん中の幅のこの割合(上から見たすぼまり)
 TAPER_ZONE = 0.70  # 前後の端からこの距離ですぼまる
-AXLES_Y = (0.95, 3.70)  # 後輪・前輪の車軸(後端からの距離)
-WHEEL_RADIUS = 0.345
+AXLES_Y = (0.95, 3.74)  # 後輪・前輪の車軸(後端からの距離)
+WHEEL_RADIUS = 0.36
 WHEEL_WIDTH = 0.23
-ARCH_RADIUS = 0.385
+ARCH_RADIUS = 0.40
 # 窓: 横の窓はAピラー・Cピラーの線から内側へずらした範囲。Bピラーで前後に分ける
-SIDE_WINDOW_INSET_A = 0.13  # Aピラーの太さ(水平方向)
+SIDE_WINDOW_INSET_A = 0.07  # Aピラーの太さ(水平方向)
 SIDE_WINDOW_INSET_C = 0.16
 SIDE_WINDOW_BOTTOM = BELT + 0.04
-SIDE_WINDOW_TOP = 1.36
-B_PILLAR = (2.02, 2.12)
-SCREEN_HALF = 0.70  # 前後の窓(フロントガラス・リアガラス)の横幅の半分(下の端)
-SCREEN_HALF_TOP = 0.52  # 上の端(上が狭い台形)
+SIDE_WINDOW_TOP = 1.37
+WINDOW_KICK = (1.55, 0.12)  # 窓の下の縁は、このy(後端から)より後ろで上へ跳ね上がる(後ろの端で+0.12m)
+B_PILLAR = (1.98, 2.08)
+SCREEN_HALF = 0.76  # 前後の窓(フロントガラス・リアガラス)の横幅の半分(下の端)
+SCREEN_HALF_TOP = 0.59  # 上の端(上が狭い台形)
 
 
 def profile_z(y):

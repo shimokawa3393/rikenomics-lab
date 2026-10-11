@@ -24,7 +24,7 @@ from mathutils.bvhtree import BVHTree
 from shots import (
     ARCH_RADIUS, ASPHALT, ROOF_Z, SCREEN_HALF_TOP, AXLES_Y, B_PILLAR, BELT, CAM_LENS, CAM_LOC, CAM_TARGET, CAR_LENGTH, CAR_PROFILE,
     CAR_WIDTH, LINE_WIDTH, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
-    SIDE_WINDOW_INSET_A, SIDE_WINDOW_INSET_C, SIDE_WINDOW_TOP, SLOT_LENGTH, SLOT_WIDTH, TAPER_ZONE,
+    SIDE_WINDOW_INSET_A, SIDE_WINDOW_INSET_C, SIDE_WINDOW_TOP, WINDOW_KICK, SLOT_LENGTH, SLOT_WIDTH, TAPER_ZONE,
     WHEEL_RADIUS, WHEEL_WIDTH, WIP_BLEND,
 )
 
@@ -115,7 +115,7 @@ def car_materials():
     glass = principled("CarGlass", (0.015, 0.017, 0.02), roughness=0.03, coat=0.0)
     under = principled("CarUnder", (0.012, 0.012, 0.012), roughness=0.8)
     tire = principled("Tire", (0.02, 0.02, 0.02), roughness=0.75)
-    rim = principled("Rim", (0.55, 0.56, 0.58), roughness=0.25, metallic=1.0)
+    rim = principled("Rim", (0.20, 0.205, 0.215), roughness=0.3, metallic=1.0)  # 暗いガンメタ(参考画像)
     lamp = principled("HeadLamp", (0.06, 0.065, 0.07), roughness=0.05, metallic=0.8, coat=1.0)
     drl = bpy.data.materials.new("DRL")  # デイライト(細い白い光の線)
     drl.use_nodes = True
@@ -124,7 +124,11 @@ def car_materials():
     em.inputs['Emission Strength'].default_value = 6.0
     grille = principled("Grille", (0.01, 0.01, 0.01), roughness=0.35, coat=0.5)
     plate = principled("Plate", (0.75, 0.75, 0.72), roughness=0.35)
-    return [paint, glass, under, tire, rim, lamp, grille, drl, plate]
+    tail = principled("TailLamp", (0.20, 0.006, 0.006), roughness=0.05, coat=1.0)  # 点いていない赤いレンズ(暗い中でも赤と分かる程度に光らせる)
+    bsdf = next(n for n in tail.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Emission Color'].default_value = (1.0, 0.03, 0.02, 1)
+    bsdf.inputs['Emission Strength'].default_value = 0.06
+    return [paint, glass, under, tire, rim, lamp, grille, drl, plate, tail]
 
 
 def line_plane(p1, p2):
@@ -140,49 +144,182 @@ def pillar_line_y(p_low, p_high, z, inset):
     return p_low[0] + (p_high[0] - p_low[0]) * t + inset
 
 
-FRONT_Z_CUTS = (0.27, 0.30, 0.33, 0.40, 0.52, 0.53, 0.600, 0.613, 0.700, 0.705, 0.71)
+GRILLE_SLATS = (0.585, 0.630)  # グリルの横の桟(めっき)。真っ黒な四角だと箱に見える
+FRONT_Z_CUTS = (0.27, 0.28, 0.30, 0.36, 0.40, 0.680, 0.693) + tuple(z + d for z in GRILLE_SLATS for d in (0.0, 0.008))
+FRONT_X_CUTS = (0.38, 0.42, 0.50, 0.55, 0.72)
+LAMP_INNER = 0.40  # ヘッドライトの内側の端(|x|)
+LAMP_Z0, LAMP_SLOPE = 0.645, 0.07  # ヘッドライトの下の縁: 内側でz=LAMP_Z0、外へ行くほどゆるく上がる(急だとシャープすぎる)
+LAMP_HEIGHT, DRL_HEIGHT = 0.085, 0.012  # ライトに縦の厚みを持たせる(細い線だけだと鋭く見える)
+GRILLE_TOP, GRILLE_BOTTOM = 0.68, 0.40
+GRILLE_HALF_TOP, GRILLE_HALF_BOTTOM = 0.44, 0.41  # グリルはほぼ長方形(下をすぼめると鋭く見える)
+
+
 def screen_half(z):
     """前後の窓の横幅の半分。ベルトラインでSCREEN_HALF、屋根でSCREEN_HALF_TOP(車体のすぼまりに合わせた台形)。"""
     t = min(max((z - BELT) / (ROOF_Z - BELT), 0.0), 1.0)
     return SCREEN_HALF + (SCREEN_HALF_TOP - SCREEN_HALF) * t
 
 
-FRONT_X_CUTS = (0.28, 0.32, 0.48, 0.55, 0.68)
+def lamp_low(ax):
+    return LAMP_Z0 + LAMP_SLOPE * (ax - LAMP_INNER)
+
+
+def front_slices(bm):
+    """顔の斜めの線(吊り目のライト、台形のグリル)で切る。"""
+    for sx in (-1, 1):
+        for dz in (0.0, DRL_HEIGHT, LAMP_HEIGHT):  # ライトの下の縁・光の線の上・ライトの上の縁
+            slice_plane(bm, (sx * LAMP_INNER, 0, LAMP_Z0 + dz), (-sx * LAMP_SLOPE, 0, 1))
+        dx, dz = GRILLE_HALF_TOP - GRILLE_HALF_BOTTOM, GRILLE_TOP - GRILLE_BOTTOM
+        slice_plane(bm, (sx * GRILLE_HALF_BOTTOM, 0, GRILLE_BOTTOM), (dz, 0, -sx * dx))
 
 
 def front_face_material(c, n):
     """前の面(と角)のどこを何色に塗るか。c=面の中心、n=法線。材質: 4めっき 5ライトのレンズ 6黒い開口 7デイライト"""
-    facing = (c.y > 4.35 and n.y > 0.25) or (c.y > 4.30 and abs(n.x) > 0.3 and n.y > 0.05)
+    facing = (c.y > 4.30 and n.y > 0.2) or (c.y > 4.15 and abs(n.x) > 0.3 and n.y > 0.02)
     if not facing:
         return None
     ax, z = abs(c.x), c.z
-    if 0.613 < z < 0.705 and ax > 0.32:
-        return 5
-    if 0.600 < z < 0.613 and ax > 0.32:
-        return 7
-    if ax < 0.28 and 0.53 < z < 0.70:  # グリル(ナンバーより上)
-        return 6
-    if ax < 0.30 and 0.52 < z < 0.71:
+    low = lamp_low(min(ax, 0.95))
+    if ax > LAMP_INNER and low < z < low + LAMP_HEIGHT:
+        return 7 if z < low + DRL_HEIGHT else 5
+    if ax < LAMP_INNER + 0.02 and 0.680 < z < 0.693:  # グリルの上のめっきの帯(左右のライトをつなぐ)
         return 4
-    if ax < 0.48 and 0.27 < z < 0.33:  # 下の開口(ナンバーより下)
+    half = GRILLE_HALF_BOTTOM + (GRILLE_HALF_TOP - GRILLE_HALF_BOTTOM) * (z - GRILLE_BOTTOM) / (GRILLE_TOP - GRILLE_BOTTOM)
+    if GRILLE_BOTTOM < z < GRILLE_TOP and ax < half:
+        return 4 if any(zs < z < zs + 0.008 for zs in GRILLE_SLATS) and ax < half - 0.03 else 6
+    if ax < 0.50 and z < 0.30:  # 下の開口
         return 6
-    if 0.55 < ax < 0.68 and 0.30 < z < 0.40:
+    if 0.50 < ax < 0.72 and 0.28 < z < 0.36:  # 左右の細い開口
         return 6
     return None
 
 
-SHOULDER_Z = 0.86  # 肩のキャラクターライン
-DOOR_SEAMS = (3.38, 2.07, 1.02)  # 前のドアの前端、前後のドアの境、後ろのドアの後端(後端からの距離)
-A_LOW, A_HIGH = (3.55, 0.99), (2.75, 1.43)  # フロントガラスの下端・上端(横から見た線)
-C_LOW, C_HIGH = (0.60, 0.99), (1.35, 1.38)  # リアガラス
+REAR_Z_CUTS = (0.33, 0.36, 0.40, 0.740, 0.746, 0.80, 0.825, 0.84, 0.88)
+REAR_X_CUTS = (0.36, 0.55, 0.620, 0.626, 0.70)
+
+
+def rear_face_material(c, n):
+    """後ろの面(と角)の塗り分け。材質: 2黒い下まわり 6隙間 9テールランプ"""
+    ax, z = abs(c.x), c.z
+    facing = (c.y < 0.30 and n.y < -0.25) or (c.y < 0.40 and abs(n.x) > 0.3 and n.y < -0.05)
+    wrap = c.y < 0.24 and abs(n.x) > 0.3  # テールランプは横の面へ少し回り込む
+    if 0.80 < z < 0.88 and ((facing and ax > 0.36) or wrap):
+        return 9
+    if not facing:
+        if n.z > 0.5 and c.y < C_LOW[0] + 0.02 and 0.620 < ax < 0.626:  # トランクの蓋の横の隙間(上の面)
+            return 6
+        return None
+    if 0.825 < z < 0.84:  # 左右のランプをつなぐ細い光の帯
+        return 9
+    if 0.620 < ax < 0.626 and z > 0.740:  # トランクの蓋の横の隙間
+        return 6
+    if 0.740 < z < 0.746 and ax < 0.626:  # トランクの蓋の下の隙間
+        return 6
+    if 0.55 < ax < 0.70 and 0.36 < z < 0.40:  # 反射板
+        return 9
+    if z < 0.33:  # 黒い下まわり(サイドスカートとつなげる)
+        return 2
+    return None
+
+
+SHOULDER_Z = 0.90  # 肩のキャラクターライン
+DOOR_SEAMS = (3.30, 2.03, 0.98)  # 前のドアの前端、前後のドアの境、後ろのドアの後端(後端からの距離)
+A_LOW, A_HIGH = (3.45, 1.04), (2.55, 1.45)  # フロントガラスの下端・上端(横から見た線)
+C_LOW, C_HIGH = (0.45, 1.05), (1.45, 1.41)  # リアガラス
+
+
+def window_bottom(y):
+    """横の窓の下の縁の高さ。後ろで跳ね上がる。"""
+    y0, rise = WINDOW_KICK
+    return SIDE_WINDOW_BOTTOM + rise * max(0.0, y0 - y) / (y0 - C_LOW[0])
 
 
 def in_side_window(y, z):
-    if not (SIDE_WINDOW_BOTTOM < z < SIDE_WINDOW_TOP):
+    if not (window_bottom(y) < z < SIDE_WINDOW_TOP):
         return False
     front = pillar_line_y(A_LOW, A_HIGH, z, -SIDE_WINDOW_INSET_A)
     rear = pillar_line_y(C_LOW, C_HIGH, z, SIDE_WINDOW_INSET_C)
     return rear < y < front and not (B_PILLAR[0] < y < B_PILLAR[1])
+
+
+def catmull_clark(bm, levels):
+    """bmeshをサブディビジョン(Catmull-Clark)でなめらかにする。塗り分けの切れ目を入れる前に使う(後だと境目が波打つ)。"""
+    me = bpy.data.meshes.new("_round")
+    bm.to_mesh(me)
+    obj = bpy.data.objects.new("_round", me)
+    bpy.context.scene.collection.objects.link(obj)
+    sub = obj.modifiers.new("Round", 'SUBSURF')
+    sub.levels = sub.render_levels = levels
+    sub.boundary_smooth = 'PRESERVE_CORNERS'
+    ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    bm.clear()
+    bm.from_mesh(ev.to_mesh())
+    ev.to_mesh_clear()
+    bpy.data.objects.remove(obj)
+    bpy.data.meshes.remove(me)
+
+
+LENGTH_CROWNS = (  # (y0, y1, 盛り上がり[m]): ボンネット・屋根・トランクの前後方向のふくらみ
+    (A_LOW[0], CAR_LENGTH - 0.15, 0.025),
+    (C_HIGH[0], A_HIGH[0], 0.012),
+    (0.10, C_LOW[0], 0.008),
+)
+FACE_DEPTH = 0.30  # 前後の端からこの範囲を、真ん中が張り出すように曲げる
+
+
+CHAR_LINE = (0.80, 0.74)  # キャラクターラインの高さ(後端, 前端)。後ろへ向かって上がる
+HOOD_LINE_X = 0.42  # ボンネットの盛り上がった線の位置(|x|)
+
+
+def char_line_z(y):
+    return CHAR_LINE[0] + (CHAR_LINE[1] - CHAR_LINE[0]) * y / CAR_LENGTH
+
+
+def local_relief(bm):
+    """局所的な凹凸: キャラクターライン、フェンダーのふくらみ、ドアの下のへこみ、ボンネットの線、トランクの跳ね上がり。"""
+    half = CAR_WIDTH / 2
+    # 線をきれいに出すための切れ目(キャラクターラインに沿った斜めの線、ボンネットの線の両側)
+    for d in (-0.035, -0.012, 0.0, 0.012, 0.035):
+        co, no = line_plane((0.0, CHAR_LINE[0] + d), (CAR_LENGTH, CHAR_LINE[1] + d))
+        slice_plane(bm, co, no)
+    for sx in (-1, 1):
+        for d in (-0.05, -0.015, 0.0, 0.015, 0.05):
+            slice_plane(bm, (sx * (HOOD_LINE_X + d), 0, 0), (1, 0, 0))
+    for v in bm.verts:
+        x, y, z = v.co
+        sx = 1.0 if x > 0 else -1.0
+        ax = abs(x)
+        # 横の面だけにかける。範囲の境目でいきなり0にするとしわが寄るので、なめらかに弱める
+        w_side = min(max((ax - half * 0.70) / (half * 0.15), 0.0), 1.0)
+        w_side *= min(max((BELT - 0.02 - z) / 0.12, 0.0), 1.0) * min(max((z - 0.24) / 0.06, 0.0), 1.0)
+        if w_side > 0:
+            out = 0.0
+            # キャラクターライン: 幅7cmの山形の稜線(映り込みに細いハイライトの線が出る)
+            d = abs(z - char_line_z(y))
+            fade = min(1.0, min(y - 0.3, CAR_LENGTH - 0.3 - y) / 0.4) if 0.3 < y < CAR_LENGTH - 0.3 else 0.0
+            out += 0.006 * max(0.0, 1.0 - d / 0.035) * max(fade, 0.0)
+            # フェンダーのふくらみ: タイヤのアーチのまわりを外へ
+            for ay in AXLES_Y:
+                r = math.hypot(y - ay, z - WHEEL_RADIUS)
+                # アーチの内側(あとで円柱で抜く所)も同じだけ動かす。動かさないと、抜いた縁で面がねじれてしわになる
+                t = min(max((r - ARCH_RADIUS) / 0.28, 0.0), 1.0)
+                out += 0.014 * 0.5 * (1.0 + math.cos(math.pi * t))
+            # ドアの下のへこみ: アーチとアーチのあいだ、ラインの下をゆるくへこませる
+            y0, y1 = AXLES_Y[0] + ARCH_RADIUS + 0.10, AXLES_Y[1] - ARCH_RADIUS - 0.10
+            top = char_line_z(y) - 0.06
+            if y0 < y < y1 and 0.36 < z < top:
+                u = (z - 0.36) / (top - 0.36)
+                along = math.sin(math.pi * (y - y0) / (y1 - y0)) ** 0.5
+                out -= 0.007 * math.sin(math.pi * u) * along
+            v.co.x += sx * out * w_side
+        # ボンネットの2本の線: 幅10cmの盛り上がり。フロントガラスの根元から鼻先へ消えていく
+        if z > 0.80 and A_LOW[0] + 0.05 < y < CAR_LENGTH - 0.10:
+            d = abs(ax - HOOD_LINE_X)
+            t = (y - A_LOW[0]) / (CAR_LENGTH - A_LOW[0])
+            v.co.z += 0.007 * max(0.0, 1.0 - d / 0.05) * (1.0 - 0.6 * t)
+        # トランクの後ろの端の小さな跳ね上がり(ダックテール)
+        if z > 0.90 and y < 0.30:
+            v.co.z += 0.012 * max(0.0, 1.0 - y / 0.30) * (1.0 - (ax / half) ** 4)
 
 
 def body_mesh(bm):
@@ -195,10 +332,17 @@ def body_mesh(bm):
     bmesh.ops.translate(bm, vec=(CAR_WIDTH, 0, 0), verts=right)
     bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
     bmesh.ops.bevel(bm, geom=list(bm.edges), offset=0.13, segments=5, profile=0.5, affect='EDGES', clamp_overlap=True)
-    # すぼめるための切れ目(yは8cmごと、ベルトラインより上はzも4cmごと)
+    # 細かい角を丸める: 面取りの段差と、短い線分で面取りしきれなかった折れ目(鼻先・トランクの角)をなめらかに。
+    # 平らな横の面(大きな多角形)は外しておき、後で張り直す(丸めると中心から放射状の細い面になり、映り込みがまだらになる)
+    bm.normal_update()
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if abs(f.normal.x) > 0.999], context='FACES_ONLY')
+    catmull_clark(bm, 2)
+    bmesh.ops.holes_fill(bm, edges=[e for e in bm.edges if e.is_boundary], sides=0)
+    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    # すぼめる・曲げるための切れ目(yは8cmごと、zは4cmごと。切れ目が少ないと横の面が平らな板のまま残る)
     for i in range(1, int(CAR_LENGTH / 0.08)):
         slice_plane(bm, (0, i * 0.08, 0), (0, 1, 0))
-    z = BELT + 0.04
+    z = 0.28
     while z < ROOF_Z:
         slice_plane(bm, (0, 0, z), (0, 0, 1))
         z += 0.04
@@ -224,18 +368,30 @@ def body_mesh(bm):
                 u = (SHOULDER_Z - zz) / (SHOULDER_Z - 0.24)
                 bulge = 0.026 - 0.070 * u ** 1.5
             v.co.x *= 1.0 + bulge * (0.4 + 0.6 * along)
-        if zz > 0.75 and abs(x) < half * 0.9:  # 上の面(屋根・ボンネット・トランク): 真ん中が少し盛り上がる
+        if zz > 0.80 and abs(x) < half * 0.9:  # 上の面(屋根・ボンネット・トランク): 真ん中が少し盛り上がる
             w = x / (half * 0.9)
             v.co.z += 0.025 * (1.0 - w * w) * (0.5 + 0.5 * along)
+            for y0, y1, amp in LENGTH_CROWNS:  # 前後方向にも盛り上げる(上の面がまっすぐな板に見えないように)
+                if y0 < y < y1:
+                    v.co.z += amp * math.sin(math.pi * (y - y0) / (y1 - y0)) * (1.0 - 0.5 * w * w)
+        v.co.x *= 1.0 + 0.018 * along  # 上から見て真ん中が少しふくらむ弓なり(ドアの面が前後にも曲がる)
+        w = min(abs(x) / half, 1.0)
+        front = (y - (CAR_LENGTH - FACE_DEPTH)) / FACE_DEPTH
+        if front > 0:  # 前の面の真ん中を前へ張り出す
+            v.co.y += 0.035 * (1.0 - w * w) * front
+        rear = (FACE_DEPTH - y) / FACE_DEPTH
+        if rear > 0:  # 後ろの面も同じく
+            v.co.y -= 0.025 * (1.0 - w * w) * rear
+    local_relief(bm)
     for y in DOOR_SEAMS:
         for d in (-0.004, 0.004):
             slice_plane(bm, (0, y + d, 0), (0, 1, 0))
     # 顔(ヘッドライト・グリル・開口)は、窓と同じくボディの面を塗り分けて作る(箱を貼ると浮いて見える)
     for zz in (BELT + 0.005, 0.33, SHOULDER_Z):
         slice_plane(bm, (0, 0, zz), (0, 0, 1))
-    for zz in FRONT_Z_CUTS:
+    for zz in FRONT_Z_CUTS + REAR_Z_CUTS:
         slice_plane(bm, (0, 0, zz), (0, 0, 1))
-    for xx in FRONT_X_CUTS:
+    for xx in FRONT_X_CUTS + REAR_X_CUTS:
         for sx in (-1, 1):
             slice_plane(bm, (sx * xx, 0, 0), (1, 0, 0))
     # 窓の縁で切る(横の窓の前後・上下・Bピラー、前後の窓の左右)
@@ -244,6 +400,9 @@ def body_mesh(bm):
         slice_plane(bm, co, no)
     for zz in (SIDE_WINDOW_BOTTOM, SIDE_WINDOW_TOP):
         slice_plane(bm, (0, 0, zz), (0, 0, 1))
+    co, no = line_plane((WINDOW_KICK[0], SIDE_WINDOW_BOTTOM), (C_LOW[0], SIDE_WINDOW_BOTTOM + WINDOW_KICK[1]))
+    slice_plane(bm, co, no)
+    front_slices(bm)
     for y in B_PILLAR:
         slice_plane(bm, (0, y, 0), (0, 1, 0))
     for sx in (-1, 1):  # 前後の窓の左右の縁: 上ほど内側へ入る斜めの線(台形)
@@ -259,18 +418,21 @@ def body_mesh(bm):
         elif n.z > -0.2 and abs(c.x) < screen_half(c.z):  # フロントガラス・リアガラス(斜めの面、上が狭い台形)
             w = c.x / (half * 0.9)
             crown = 0.024 * max(0.0, 1.0 - w * w)  # 屋根の盛り上がりの分だけ上の縁も上げる(縁の線を水平にそろえる)
-            on_front = A_HIGH[0] + 0.05 < c.y < A_LOW[0] - 0.04 and BELT + 0.03 < c.z < 1.40 + crown  # 上に屋根の縁を残す
-            on_rear = C_LOW[0] + 0.05 < c.y < C_HIGH[0] - 0.05 and BELT + 0.03 < c.z < 1.38
+            on_front = A_HIGH[0] + 0.05 < c.y < A_LOW[0] - 0.04 and BELT + 0.03 < c.z < A_HIGH[1] - 0.04 + crown  # 上に屋根の縁を残す
+            on_rear = C_LOW[0] + 0.05 < c.y < C_HIGH[0] - 0.05 and C_LOW[1] + 0.03 < c.z < C_HIGH[1] - 0.02
             glass = (on_front or on_rear) and n.z < 0.97
         f.material_index = 1 if glass else 0
         if abs(n.x) > 0.55 and 0.27 < c.z < BELT - 0.01 and any(abs(c.y - y) < 0.004 for y in DOOR_SEAMS):
             f.material_index = 6  # ドアの隙間
-        if abs(n.x) > 0.55 and BELT + 0.005 < c.z < SIDE_WINDOW_BOTTOM and \
-                pillar_line_y(C_LOW, C_HIGH, c.z, SIDE_WINDOW_INSET_C) < c.y < pillar_line_y(A_LOW, A_HIGH, c.z, -SIDE_WINDOW_INSET_A):
-            f.material_index = 4  # 窓の下のめっきの帯
+        if abs(n.x) > 0.55 and B_PILLAR[0] < c.y < B_PILLAR[1] and window_bottom(c.y) < c.z < SIDE_WINDOW_TOP:
+            f.material_index = 6  # 黒いBピラー(窓が1枚につながって見え、屋根が浮いて見える)。下は金属
         if abs(n.x) > 0.4 and c.z < 0.33:
             f.material_index = 2  # 黒いサイドスカート(車を低く見せる)
+        if c.y > 4.35 and n.y > 0.25 and c.z < 0.27:
+            f.material_index = 2  # 前の下の黒い縁(リップ)。箱で貼ると角ではみ出す
         face_mat = front_face_material(c, n)
+        if face_mat is None:
+            face_mat = rear_face_material(c, n)
         if face_mat is not None:
             f.material_index = face_mat
         if c.z < 0.26 and n.z < -0.5:
@@ -301,12 +463,12 @@ def wheel_mesh(bm, side, y):
     for f in bm.faces:
         if f not in before:
             f.material_index = 6  # 奥は暗く
-    for k in range(10):
-        a = 2 * math.pi * k / 10
+    for k in range(10):  # 5本のダブルスポーク
+        a = 2 * math.pi * (k // 2) / 5 + (1 if k % 2 else -1) * math.radians(7)
         before = set(bm.faces)
         m = (mathutils.Matrix.Translation((face_x - side * 0.012, y, WHEEL_RADIUS))
              @ mathutils.Matrix.Rotation(a, 4, 'X') @ mathutils.Matrix.Translation((0, 0, 0.125))
-             @ mathutils.Matrix.Diagonal((0.022, 0.030, 0.235, 1.0)))
+             @ mathutils.Matrix.Diagonal((0.026, 0.026, 0.235, 1.0)))
         bmesh.ops.create_cube(bm, size=1.0, matrix=m)
         for f in bm.faces:
             if f not in before:
@@ -323,7 +485,12 @@ def wheel_mesh(bm, side, y):
     for f in bm.faces:
         if f not in before:
             f.material_index = 4
-    rounded_box(bm, (face_x - side * 0.012, y, WHEEL_RADIUS), (0.03, 0.07, 0.07), 4, 0.01)  # センターキャップ
+    before = set(bm.faces)
+    bmesh.ops.create_cone(bm, cap_ends=True, segments=24, radius1=0.04, radius2=0.035, depth=0.02,  # センターキャップ
+                          matrix=mathutils.Matrix.Translation((face_x - side * 0.008, y, WHEEL_RADIUS)) @ rot)
+    for f in bm.faces:
+        if f not in before:
+            f.material_index = 4
 
 
 def stick(bm, bvh, origin, direction, size, mat_index, bevel, sink=0.4, up=(0, 0, 1), segments=3):
@@ -346,22 +513,24 @@ def details_mesh(bm, bvh):
     half = CAR_WIDTH / 2
     front = (0, -1, 0)  # 前から後ろへ向けて光線を飛ばす
     for side in (-1, 1):
-        rounded_box(bm, (side * (half + 0.07), 3.40, 1.07), (0.20, 0.10, 0.12), 0, 0.03)  # ミラー
-        rounded_box(bm, (side * (half - 0.03), 3.44, 1.04), (0.10, 0.05, 0.04), 0, 0.01)
-        rounded_box(bm, (side * 0.62, 0.01, 0.86), (0.40, 0.04, 0.10), 6, 0.015)  # テールランプ
-        for y in (2.70, 1.40):  # ドアの取っ手
-            stick(bm, bvh, (side * 2.0, y, 0.90), (-side, 0, 0), (0.17, 0.03, 0.035), 6, 0.012, sink=0.3)
-    stick(bm, bvh, (0, 6.0, 0.4275), front, (0.33, 0.02, 0.165), 8, 0.008, sink=0.1)  # ナンバープレート(文字なし。グリルと下の開口の間)
-    stick(bm, bvh, (0, 6.0, 0.245), front, (1.20, 0.05, 0.03), 2, 0.010)  # 下のリップ
+        rounded_box(bm, (side * (half + 0.03), 3.18, 1.14), (0.19, 0.09, 0.11), 0, 0.04, 4)  # ミラー(ドアに付く、丸い)
+        rounded_box(bm, (side * (half - 0.04), 3.20, 1.09), (0.08, 0.06, 0.03), 6, 0.01)  # ミラーの付け根(黒)
+        for y in (2.62, 1.36):  # ドアの取っ手
+            stick(bm, bvh, (side * 2.0, y, 0.94), (-side, 0, 0), (0.17, 0.03, 0.035), 6, 0.012, sink=0.3)
+    stick(bm, bvh, (0, 6.0, 0.47), front, (0.33, 0.02, 0.165), 8, 0.008, sink=0.1)  # ナンバープレート(文字なし。グリルの下の方に重ねる)
+    stick(bm, bvh, (0, -2.0, 0.57), (0, 1, 0), (0.33, 0.02, 0.165), 8, 0.008, sink=0.1)  # 後ろのナンバープレート
 
 
 def build_car(col):
     mats = car_materials()
     bm = bmesh.new()
     body_mesh(bm)
-    bvh = BVHTree.FromBMesh(bm)  # 部品をボディの表面に貼るため
     smooth_shading(bm, 35.0)
     body = mesh_object("CarBody", bm, mats, col)
+    bm = bmesh.new()
+    bm.from_mesh(body.data)
+    bvh = BVHTree.FromBMesh(bm)  # 部品をボディの表面に貼るため
+    bm.free()
     # フェンダーの切り欠き: 円柱で抜く(抜いた内側の面は床下の色)
     cutters = []
     for y in AXLES_Y:
