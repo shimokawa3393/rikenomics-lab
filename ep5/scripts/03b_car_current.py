@@ -25,6 +25,9 @@ CACHE_IN = os.path.join(EP5, "cache", "car_body.npz")
 CACHE_OUT = os.path.join(EP5, "cache", "car_current.npz")
 Z_WINDOW = (SIDE_WINDOW_BOTTOM + SIDE_WINDOW_TOP) / 2 + 0.02  # 窓の高さの真ん中(ここを横切る電流はピラーしか通れない)
 Z_SIDE = 0.65  # ドアの真ん中の高さ(側面の電流の密度を測る)
+STEEL_RHO = 120e-9  # 軟鋼の抵抗率[Ωm](IEC 62305-1 表D.2)
+SHEET = 0.8e-3  # 外板の厚さ[m]
+BODY_OHM = 1000.0  # 人の体の抵抗[Ω](手から足、感電の目安。出典を確かめる)
 
 
 def load_metal():
@@ -137,6 +140,10 @@ def main(strike=STRIKE_POINT, save=True):
     nh = nrm / np.maximum(area2, 1e-12)
     grad = (np.cross(nh, p2 - p1) * V[t[:, 0], None] + np.cross(nh, p0 - p2) * V[t[:, 1], None]
             + np.cross(nh, p1 - p0) * V[t[:, 2], None]) / np.maximum(area2, 1e-12)
+    # 屋根(落雷点)から車輪までのボディの抵抗。計算は導電率1の板(1マスの抵抗1)なので、鋼板1マスの抵抗 ρ/t をかける
+    r_car = V[src] * STEEL_RHO / SHEET
+    print(f"  屋根→車輪のボディの抵抗 {r_car * 1e3:.2f} mΩ(鋼板{SHEET * 1e3}mm、軟鋼 ρ={STEEL_RHO:.1e}Ωm)。"
+          f"人の体 約{BODY_OHM:.0f}Ω の {BODY_OHM / r_car:,.0f} 分の1")
     if save:
         np.savez(CACHE_OUT, verts=v, tris=t, V=V, J=-grad, src=src)
         print("  保存:", CACHE_OUT)
