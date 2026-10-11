@@ -23,7 +23,7 @@ from mathutils import noise
 from mathutils.bvhtree import BVHTree
 from shots import (
     ARCH_RADIUS, ASPHALT, ROOF_Z, SCREEN_HALF_TOP, AXLES_Y, B_PILLAR, BELT, CAM_LENS, CAM_LOC, CAM_TARGET, CAR_LENGTH, CAR_PROFILE,
-    CAR_WIDTH, GRASS_TEX, LINE_WIDTH, SOIL_TEX, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
+    CAR_WIDTH, GRASS_TEX, LIGHTNING_TOP, LINE_WIDTH, STRIKE_POINT, SOIL_TEX, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
     SIDE_WINDOW_INSET_A, SIDE_WINDOW_INSET_C, SIDE_WINDOW_TOP, WINDOW_KICK, SLOT_LENGTH, SLOT_WIDTH, TAPER_ZONE,
     WHEEL_RADIUS, WHEEL_WIDTH, WIP_BLEND,
 )
@@ -642,8 +642,8 @@ def asphalt_material():
     puddle.inputs['From Max'].default_value = 0.52
     nt.links.new(puddle_noise.outputs['Fac'], puddle.inputs['Value'])
     wet_rough = nt.nodes.new('ShaderNodeMapRange')  # 濡れたアスファルト全体のつや
-    wet_rough.inputs['To Min'].default_value = 0.04
-    wet_rough.inputs['To Max'].default_value = 0.22
+    wet_rough.inputs['To Min'].default_value = 0.03  # EEVEEは粗いと映り込みが消える(Cyclesより低めに)
+    wet_rough.inputs['To Max'].default_value = 0.10
     nt.links.new(rough.outputs['Color'], wet_rough.inputs['Value'])
     r_mix = nt.nodes.new('ShaderNodeMix')
     r_mix.inputs['B'].default_value = 0.02
@@ -653,7 +653,7 @@ def asphalt_material():
     nmap = nt.nodes.new('ShaderNodeNormalMap')
     nt.links.new(nor.outputs['Color'], nmap.inputs['Color'])
     n_strength = nt.nodes.new('ShaderNodeMapRange')  # 水たまりでは凹凸が消える
-    n_strength.inputs['To Min'].default_value = 0.35
+    n_strength.inputs['To Min'].default_value = 0.12  # 凹凸が強いとEEVEEでは路面の映り込みが崩れて消える
     n_strength.inputs['To Max'].default_value = 0.0
     nt.links.new(puddle.outputs['Result'], n_strength.inputs['Value'])
     nt.links.new(n_strength.outputs['Result'], nmap.inputs['Strength'])
@@ -1004,99 +1004,75 @@ def build_trees(col, rng):
     print("[Stage1] trees:", count, "groves:", dense)
 
 
-BUSHES = 70  # 草地に置く低い茂みの数(カメラに映る範囲だけ)。草の株は、遠目だと虫の群れに見えたので置かない
+def bolt_path(rng, start, end, segments, jitter):
+    """startからendへのギザギザの道(中点を横へずらしていく)。jitterは長さに対するずれの割合。"""
+    pts = [V(start), V(end)]
+    for _ in range(segments):
+        new = [pts[0]]
+        for a, b in zip(pts, pts[1:]):
+            d = b - a
+            side = d.cross(V((0, 0, 1)))
+            side = side.normalized() if side.length > 1e-6 else V((1, 0, 0))
+            up = side.cross(d).normalized()
+            m = (a + b) / 2 + (side * rng.gauss(0, 1) + up * rng.gauss(0, 0.5)) * d.length * jitter
+            new += [m, b]
+        pts = new
+    return pts
 
 
-def bush_mesh():
-    """低い茂み(直径1): 小さな葉の塊を十数個寄せ、細かくゆがめて縁をギザギザにする(なめらかな半球だと石に見える)。"""
-    bm = bmesh.new()
-    r_ = random.Random(11)
-    for _ in range(14):
-        a = r_.uniform(0, 2 * math.pi)
-        d = r_.uniform(0.0, 0.38)
-        r = r_.uniform(0.14, 0.26)
-        c = (d * math.cos(a), d * math.sin(a), r_.uniform(0.15, 0.45) * (1.0 - d))
-        bmesh.ops.create_icosphere(bm, subdivisions=2, radius=r, matrix=mathutils.Matrix.Translation(c))
-    for v in bm.verts:
-        v.co += noise.noise_vector(v.co * 9.0) * 0.06 + noise.noise_vector(v.co * 25.0) * 0.025
-        v.co.z = max(v.co.z, 0.0)
-    me = bpy.data.meshes.new("Bush")
-    bm.to_mesh(me)
-    bm.free()
-    return me
+def bolt_curve(name, pts, radius_fn, mat, col):
+    cu = bpy.data.curves.new(name, 'CURVE')
+    cu.dimensions = '3D'
+    cu.bevel_depth = 1.0
+    cu.bevel_resolution = 1
+    sp = cu.splines.new('POLY')
+    sp.points.add(len(pts) - 1)
+    for i, p in enumerate(pts):
+        sp.points[i].co = (*p, 1.0)
+        sp.points[i].radius = radius_fn(i / (len(pts) - 1), p)
+    cu.materials.append(mat)
+    obj = link(bpy.data.objects.new(name, cu), col)
+    obj.visible_shadow = False
+    return obj
 
 
-def plant_material(name, dark, light):
-    """草・茂みの色: 1つずつ色を変え(Object Infoの乱数)、根元ほど暗くする。"""
-    mat = bpy.data.materials.new(name)
+def build_lightning(col, rng):
+    """雷: 雲から屋根の真ん中へ下りる主の道と、途中から分かれて空中で消える枝。光る管(太さは遠いほど太く、画面で数画素)。
+    画面全体を照らす光は、道の途中に置いた点光源(frame_stateで落ちるフレームだけ点ける)。"""
+    mat = bpy.data.materials.new("Lightning")
     mat.use_nodes = True
     nt = mat.node_tree
-    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
-    bsdf.inputs['Roughness'].default_value = 0.8
-    info = nt.nodes.new('ShaderNodeObjectInfo')
-    ramp = nt.nodes.new('ShaderNodeValToRGB')
-    ramp.color_ramp.elements[0].color = (*dark, 1)
-    ramp.color_ramp.elements[1].color = (*light, 1)
-    nt.links.new(info.outputs['Random'], ramp.inputs['Fac'])
-    coord = nt.nodes.new('ShaderNodeTexCoord')
-    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
-    nt.links.new(coord.outputs['Generated'], sep.inputs['Vector'])
-    ao = nt.nodes.new('ShaderNodeMapRange')  # 根元(下)ほど暗い
-    ao.inputs['To Min'].default_value = 0.35
-    nt.links.new(sep.outputs['Z'], ao.inputs['Value'])
-    mul = nt.nodes.new('ShaderNodeMix')
-    mul.data_type = 'RGBA'
-    mul.blend_type = 'MULTIPLY'
-    mul.inputs['Factor'].default_value = 1.0
-    nt.links.new(ramp.outputs['Color'], mul.inputs['A'])
-    nt.links.new(ao.outputs['Result'], mul.inputs['B'])
-    leaf = nt.nodes.new('ShaderNodeTexVoronoi')  # 葉の粒: 明るい葉と暗いすき間
-    leaf.inputs['Scale'].default_value = 28.0
-    nt.links.new(coord.outputs['Object'], leaf.inputs['Vector'])
-    gap = nt.nodes.new('ShaderNodeMapRange')
-    gap.inputs['From Max'].default_value = 0.5
-    gap.inputs['To Min'].default_value = 1.3
-    gap.inputs['To Max'].default_value = 0.4
-    nt.links.new(leaf.outputs['Distance'], gap.inputs['Value'])
-    mul2 = nt.nodes.new('ShaderNodeMix')
-    mul2.data_type = 'RGBA'
-    mul2.blend_type = 'MULTIPLY'
-    mul2.inputs['Factor'].default_value = 1.0
-    nt.links.new(mul.outputs['Result'], mul2.inputs['A'])
-    nt.links.new(gap.outputs['Result'], mul2.inputs['B'])
-    nt.links.new(mul2.outputs['Result'], bsdf.inputs['Base Color'])
-    bump = nt.nodes.new('ShaderNodeBump')
-    bump.inputs['Strength'].default_value = 1.0
-    nt.links.new(leaf.outputs['Distance'], bump.inputs['Height'])
-    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
-    bsdf.inputs['Roughness'].default_value = 0.9
-    return mat
+    nt.nodes.clear()
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Color'].default_value = (0.82, 0.80, 1.0, 1)  # 青紫がかった白
+    em.inputs['Strength'].default_value = 120.0
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(em.outputs[0], out.inputs[0])
+    top, hit = V(LIGHTNING_TOP), V(STRIKE_POINT)
+    # 手前(カメラの近く)ほど画面で大きく見えるので、区間を分けてそれぞれギザギザにする(3Dで均等に分けると、手前がまっすぐな棒になる)
+    toward = (top - hit).normalized()
+    p80, p12, p1 = (hit + toward * d for d in (80.0, 12.0, 0.6))
+    main = (bolt_path(rng, top, p80, 8, 0.035) + bolt_path(rng, p80, p12, 6, 0.07)[1:]
+            + bolt_path(rng, p12, p1, 5, 0.10)[1:] + [hit])
 
-
-def build_ground_plants(col, rng):
-    """駐車場と林のあいだの草地に、低い茂みを散らす(軽い形のリンク複製。カメラに映る範囲だけ)。"""
-    bush = bush_mesh()
-    bush.materials.append(plant_material("Bush", (0.018, 0.035, 0.012), (0.045, 0.065, 0.020)))
-    placed = {"bush": 0}
-    for kind, me, total, size in (("bush", bush, BUSHES, (0.8, 1.8)),):
-        for _ in range(total * 20):
-            r = 20.0 + 140.0 * rng.random() ** 1.3
-            a = rng.uniform(0, 2 * math.pi)
-            x, y = r * math.cos(a), r * math.sin(a)
-            edge = 8.0  # 茂みが駐車場の縁に並ぶと生け垣に見える
-            if abs(x) < LOT_HALF[0] + edge and abs(y) < LOT_HALF[1] + edge:
-                continue
-            if not in_camera_view(x, y, 5.0) or mountain_height(x, y) > 1.0:
-                continue
-            o = link(bpy.data.objects.new(f"{kind}{placed[kind]:04d}", me), col)
-            sc = rng.uniform(*size)
-            o.scale = (sc * rng.uniform(0.8, 1.3), sc * rng.uniform(0.8, 1.3), sc)
-            o.location = (x, y, terrain_height(x, y) - 0.05)
-            o.rotation_euler = (0, 0, rng.uniform(0, 6.3))
-            placed[kind] += 1
-            if placed[kind] >= total:
-                break
-    print("[Stage1] ground plants:", placed)
+    def width(p):
+        return 0.02 + 0.0005 * (p - V(CAM_LOC)).length  # 遠くても画面で同じくらいの太さ(1画素≒距離の0.0006倍)
+    bolt_curve("LightningMain", main, lambda t, p: width(p), mat, col)
+    for k in range(9):  # 枝: 上の方ほど多く長い
+        i = int(len(main) * rng.uniform(0.03, 0.45))
+        a = main[i]
+        down = (main[min(i + 8, len(main) - 1)] - a).normalized()
+        side = down.cross(V((0, 0, 1))).normalized() * rng.choice((-1, 1))
+        length = (a - hit).length * rng.uniform(0.12, 0.30)
+        end = a + (down * 0.6 + side * rng.uniform(0.5, 1.1) + V((0, 0, -0.3))).normalized() * length
+        pts = bolt_path(rng, a, end, 6, 0.16)
+        bolt_curve(f"LightningBranch{k}", pts, lambda t, p: width(p) * 0.45 * (1.0 - 0.8 * t), mat, col)
+    glow = bpy.data.lights.new("LightningGlow", 'POINT')  # 雷の道のすぐ上の光(はっきりした影を落とす)
+    glow.energy = 0.0
+    glow.shadow_soft_size = 0.5
+    glow.color = (0.85, 0.85, 1.0)
+    link(bpy.data.objects.new("LightningGlow", glow), col).location = hit + (top - hit).normalized() * 25.0
+    col.hide_render = True
 
 
 def build_rain(col, rng):
@@ -1164,14 +1140,14 @@ def main():
     build_ground(collection("Ground"))
     build_terrain(collection("Terrain"))
     build_trees(collection("Trees"), rng)
-    build_ground_plants(collection("GroundPlants"), rng)
     build_car(collection("Car"))
     build_camera(collection("Camera"))
     build_rain(collection("Rain"), rng)
+    build_lightning(collection("Lightning"), rng)
     # 映り込み用のプローブ: 無いと車体の下半分にも空が映って白く飛ぶ(地面の暗さを拾わせる)
     probe = bpy.data.lightprobes.new("CarReflection", 'SPHERE')
     probe.influence_distance = 12.0
-    link(bpy.data.objects.new("CarReflection", probe), collection("Probes")).location = (0, 0, 1.0)
+    link(bpy.data.objects.new("CarReflection", probe), collection("Probes")).location = (0, 0, 2.2)  # 車の屋根の上(車の中に置くと、中の暗さを路面や車体に映してしまう)
     os.makedirs(os.path.dirname(WIP_BLEND), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=WIP_BLEND)
     print("[Stage1] saved:", WIP_BLEND)

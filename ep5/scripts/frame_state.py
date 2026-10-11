@@ -10,22 +10,31 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy
-from shots import RESOLUTION, SKY_HDRI
+import numpy as np
+from shots import CAM_LENS, CAM_LOC, CAM_TARGET, FPS, RESOLUTION, SKY_HDRI, STRIKE_FRAME
 
 # 雷雨の空: 曇天のHDRIを暗く落とし、少し青みのある灰色に寄せる
 SKY_ROTATION_DEG = 200.0
-SKY_CAMERA = 0.22  # カメラに直接映る空の明るさ
-SKY_FILL = 0.22  # 空が車や地面を照らす明るさ
+SKY_CAMERA = 0.42  # カメラに直接映る空の明るさ
+SKY_FILL = 0.50  # 空が車や地面を照らす明るさ
 SKY_TINT = (0.80, 0.86, 0.95)
 
 # 遠くほど雨と霧で霞む(ミストパス)。空そのものには掛けない
-HAZE_COLOR = (0.060, 0.066, 0.075)
-HAZE_AMOUNT = 0.70
+HAZE_COLOR = (0.15, 0.16, 0.18)  # 雨の霞は明るい灰色(暗い色だと夜っぽくなる)
+HAZE_AMOUNT = 0.55
 MIST_START = 30.0
 MIST_DEPTH = 4500.0
 
 CLEAR_SKY = 1.0  # 形チェックの空の明るさ(雨の日の約4倍)
 EXPOSURE = 0.6  # 全体の明るさ(段)。「全体的に少し明るく」
+
+# 雷の閃光: 落ちたフレームを1として、数フレームでちらつきながら消える(本物の雷は数回光り直す)
+FLASH_CURVE = {0: 1.0, 1: 0.35, 2: 0.8, 3: 0.2, 4: 0.05}
+FLASH_SKY = 1.3  # 閃光のとき、空の明るさを何倍にするか(雲の中で光る)
+FLASH_LIGHT = 4.0e5  # 雷の道のすぐ上の点光源の強さ[W]
+
+# 雨: 筋ごとに落ちて、見える範囲の下まで行ったら上に戻る
+RAIN_SPEED = 9.0  # 落ちる速さ[m/s](大きな雨粒)
 
 # 写真の質感(ep4と同じ)
 CHROMATIC_DISPERSION = 0.004
@@ -59,6 +68,7 @@ def build_world(clear=False):
     links.new(tint.outputs['Result'], background.inputs['Color'])
     light_path = nodes.new('ShaderNodeLightPath')
     strength = nodes.new('ShaderNodeMapRange')
+    strength.name = "SkyStrength"
     strength.inputs['To Min'].default_value = CLEAR_SKY if clear else SKY_FILL
     strength.inputs['To Max'].default_value = CLEAR_SKY if clear else SKY_CAMERA
     links.new(light_path.outputs['Is Camera Ray'], strength.inputs['Value'])
@@ -132,10 +142,65 @@ def build_compositor(scene, clear=False):
     ng.links.new(grain.outputs['Result'], out.inputs['Image'])
 
 
+def flash_amount(frame):
+    return FLASH_CURVE.get(frame - STRIKE_FRAME, 0.0)
+
+
+def apply_flash(scene, flash):
+    """雷の閃光: 雷の道を見せ、点光源を点け、空を明るくする。"""
+    col = bpy.data.collections.get("Lightning")
+    if col is not None:
+        col.hide_render = flash <= 0.0
+    light = bpy.data.lights.get("LightningGlow")
+    if light is not None:
+        light.energy = FLASH_LIGHT * flash
+    node = scene.world.node_tree.nodes.get("SkyStrength")
+    if node is not None:
+        if "base" not in node:
+            node["base"] = (node.inputs['To Min'].default_value, node.inputs['To Max'].default_value)
+        lo, hi = node["base"]
+        k = 1.0 + (FLASH_SKY - 1.0) * flash
+        node.inputs['To Min'].default_value = lo * k
+        node.inputs['To Max'].default_value = hi * k
+
+
+_rain_cache = {}
+
+
+def animate_rain(frame):
+    """雨の筋を、フレームに応じて筋の向き(風で少し傾いた下向き)に落とす。筋ごとに、カメラからの距離で見える高さの範囲を決め、
+    その範囲の中で上から下へ回す(遠い筋ほど範囲が広い)。最初の位置(生成したときの形)からのずらしなので、何フレーム目からでも同じ絵になる。"""
+    obj = bpy.data.objects.get("Rain")
+    if obj is None:
+        return
+    me = obj.data
+    if me.name not in _rain_cache:
+        co = np.empty(len(me.vertices) * 3)
+        me.vertices.foreach_get("co", co)
+        quads = co.reshape(-1, 4, 3)
+        bottom, top = quads[:, :2].mean(axis=1), quads[:, 2:].mean(axis=1)
+        axis = top - bottom
+        axis /= np.linalg.norm(axis, axis=1, keepdims=True)
+        center = quads.mean(axis=1)
+        fwd = np.array(CAM_TARGET) - np.array(CAM_LOC)
+        fwd /= np.linalg.norm(fwd)
+        depth = (center - np.array(CAM_LOC)) @ fwd
+        span = 2.2 * (18.0 / CAM_LENS) * depth  # その距離で画面に映る高さ
+        phase = np.random.default_rng(7).random(len(quads)) * span
+        _rain_cache[me.name] = (quads.copy(), axis, span, phase)
+    quads, axis, span, phase = _rain_cache[me.name]
+    u = (phase + RAIN_SPEED * (frame - 1) / FPS) % span
+    moved = quads + (axis * (span / 2 - u)[:, None] - axis * (span / 2 - phase)[:, None])[:, None, :]
+    me.vertices.foreach_set("co", moved.reshape(-1))
+    me.update()
+
+
 def apply_frame(scene, frame):
+    animate_rain(frame)
     grain = scene.compositing_node_group.nodes.get("GrainNoise")
     if grain is not None:
         grain.inputs['W'].default_value = frame * 1.37
+    apply_flash(scene, flash_amount(frame))
     scene.frame_set(frame)
 
 
@@ -157,7 +222,12 @@ def setup_render(scene, resolution_percentage=100, clear=False):
     scene.render.engine = 'BLENDER_EEVEE_NEXT' if 'BLENDER_EEVEE_NEXT' in engine_ids else 'BLENDER_EEVEE'
     scene.eevee.taa_render_samples = 64
     scene.eevee.use_raytracing = True
-    scene.eevee.ray_tracing_options.trace_max_roughness = 0.5
+    rt = scene.eevee.ray_tracing_options
+    rt.trace_max_roughness = 0.5
+    # 濡れた路面に車が映るように、画面の光線追跡を細かく(既定は半分の解像度・品質0.25で、映り込みがぼやけて消える)
+    rt.resolution_scale = '1'
+    rt.screen_trace_quality = 1.0
+    rt.screen_trace_thickness = 3.0  # 車の陰(画面に映らない床下)に当たった光線も車に当たったとみなす。薄いと空の映り込みで代用され、車の脇の路面が白く光る
     scene.render.fps = 30
     scene.render.resolution_x, scene.render.resolution_y = RESOLUTION
     scene.render.resolution_percentage = resolution_percentage
