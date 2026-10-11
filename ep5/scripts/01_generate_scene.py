@@ -24,7 +24,7 @@ from mathutils import noise
 from mathutils.bvhtree import BVHTree
 from shots import (
     ARCH_RADIUS, ASPHALT, ROOF_Z, SCREEN_HALF_TOP, AXLES_Y, B_PILLAR, BELT, CAM_LENS, CAM_LOC, CAM_TARGET, CAR_LENGTH, CAR_PROFILE,
-    CAR_WIDTH, GRASS_TEX, LIGHTNING_TOP, LINE_WIDTH, STRIKE_POINT, SOIL_TEX, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
+    CAR_WIDTH, GRASS_TEX, HERO_TREE_HEIGHT, HERO_TREE_POS, LIGHTNING_TOP, LINE_WIDTH, TREE_BREAK_Z, TREE_LIGHTNING_TOP, STRIKE_POINT, SOIL_TEX, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
     SIDE_WINDOW_INSET_A, SIDE_WINDOW_INSET_C, SIDE_WINDOW_TOP, WINDOW_KICK, SLOT_LENGTH, SLOT_WIDTH, TAPER_ZONE,
     WHEEL_RADIUS, WHEEL_WIDTH, WIP_BLEND,
 )
@@ -1005,6 +1005,377 @@ def build_trees(col, rng):
     print("[Stage1] trees:", count, "groves:", dense)
 
 
+HERO_CROWN_START = 0.36  # 枝が始まる高さ(木の高さに対する割合)。下は幹だけ(杉の林の木らしく)
+
+
+def tapered_tube(bm, pts, radii, sides, mat_index, wobble=0.0, seed=0.0):
+    """点の列に沿った、太さの変わる管(幹・枝)。wobbleは断面の凹凸(幹の筋)の大きさ。"""
+    rings = []
+    for k, (p, r) in enumerate(zip(pts, radii)):
+        d = (pts[min(k + 1, len(pts) - 1)] - pts[max(k - 1, 0)]).normalized()
+        a = d.orthogonal().normalized()
+        b = d.cross(a)
+        ring = []
+        for i in range(sides):
+            ang = 2 * math.pi * i / sides
+            rr = r * (1.0 + wobble * noise.noise(V((math.cos(ang) * 3.0, math.sin(ang) * 3.0, seed + p.z * 0.15))))
+            ring.append(bm.verts.new(p + (a * math.cos(ang) + b * math.sin(ang)) * rr))
+        rings.append(ring)
+    for r0, r1 in zip(rings, rings[1:]):
+        for i in range(sides):
+            f = bm.faces.new((r0[i], r0[(i + 1) % sides], r1[(i + 1) % sides], r1[i]))
+            f.material_index = mat_index
+            f.smooth = True
+    tip = bm.verts.new(pts[-1] + (pts[-1] - pts[-2]).normalized() * radii[-1])
+    for i in range(sides):
+        f = bm.faces.new((rings[-1][i], rings[-1][(i + 1) % sides], tip))
+        f.material_index = mat_index
+        f.smooth = True
+
+
+def foliage_clump(bm, center, radius, rng):
+    """杉の葉の塊: 細かい凹凸の球を平たくして下を垂らし、縁をトゲトゲにする(丸いままだとポンポンや盆栽に見える)。"""
+    res = bmesh.ops.create_icosphere(bm, subdivisions=3, radius=1.0)
+    verts = set(res['verts'])
+    seed = V((rng.uniform(0, 100), rng.uniform(0, 100), rng.uniform(0, 100)))
+    for v in verts:
+        n = v.co.normalized()
+        spike = max(0.0, noise.noise(n * 9.0 + seed)) ** 1.5  # 葉先の房
+        bump = 0.70 + 0.35 * noise.noise(n * 2.5 + seed) + 0.75 * spike
+        co = n * bump
+        co.z *= 0.55 if co.z > 0 else 0.75
+        v.co = center + co * radius
+    for f in {f for v in verts for f in v.link_faces}:
+        f.material_index = 1
+        f.smooth = True
+
+
+def hero_tree_mesh(rng, H=HERO_TREE_HEIGHT):
+    """オチの杉(高さHERO_TREE_HEIGHT、原点は根元)。後ろの林の木より作り込む: 根張りのある筋の入った幹、
+    らせんに出る枝と、枝先の葉の塊。倒れる動きは、この原点を軸に回す。"""
+    H = HERO_TREE_HEIGHT
+    bm = bmesh.new()
+    # 幹: 根元は根張りで太く、上へ細る。ゆるく曲げる
+    n = 36
+    pts, radii = [], []
+    for k in range(n + 1):
+        t = k / n
+        z = H * 0.985 * t - 0.4
+        bend = V((noise.noise(V((t * 2.0, 0.3, 1.1))) * 0.35, noise.noise(V((t * 2.0, 4.1, 2.3))) * 0.35, 0)) * t
+        pts.append(V((0, 0, z)) + bend)
+        flare = 0.30 * math.exp(-max(z, 0.0) / 0.7)
+        radii.append(0.34 * (1.0 - t) ** 1.15 + 0.02 + flare)
+    tapered_tube(bm, pts, radii, 18, 0, wobble=0.10, seed=3.0)
+    trunk_at = lambda z: pts[min(int((z + 0.4) / (H * 0.985) * n), n)]
+    # 枝: らせん(黄金角)に出て、少し上がってから先が垂れる。長さは下から上へまっすぐ短くなる(とがった円錐の樹形)
+    golden = math.pi * (3 - math.sqrt(5))
+    count = 120
+    for k in range(count):
+        t = k / (count - 1)
+        z = H * (HERO_CROWN_START + (0.95 - HERO_CROWN_START) * t) + rng.uniform(-0.12, 0.12)
+        length = (2.4 * (1.0 - t) + 0.25) * rng.uniform(0.85, 1.12)
+        ang = k * golden + rng.uniform(-0.2, 0.2)
+        out = V((math.cos(ang), math.sin(ang), 0))
+        base = trunk_at(z)
+        rise = rng.uniform(0.10, 0.30)
+
+        def along(s):
+            return base + out * length * s + V((0, 0, length * (rise * s - 0.40 * s * s)))
+        tapered_tube(bm, [along(s) for s in (0.0, 0.35, 0.7, 1.0)], [0.05 * (1.0 - t) + 0.015, 0.03 * (1.0 - t) + 0.01, 0.018, 0.008], 6, 0)
+        # 枝に沿って小さな葉の塊を並べる(先ほど小さく)
+        size = 0.30 + 0.30 * (1.0 - t)
+        steps = max(2, int(length / 0.45))
+        for i in range(steps):
+            s = 0.35 + 0.65 * (i + 1) / steps
+            p = along(s) + V((rng.gauss(0, 0.08), rng.gauss(0, 0.08), rng.gauss(0, 0.05)))
+            foliage_clump(bm, p, size * rng.uniform(0.8, 1.1) * (1.05 - 0.3 * s), rng)
+    # 幹のまわりの内側の葉(枝のあいだから空が抜けすぎないように)と、とがったてっぺん
+    for k in range(40):
+        t = rng.uniform(0.0, 0.95)
+        z = H * (HERO_CROWN_START + 0.03 + (0.95 - HERO_CROWN_START) * t)
+        ang = rng.uniform(0, 2 * math.pi)
+        r = (1.3 * (1.0 - t) + 0.1) * rng.uniform(0.2, 0.6)
+        foliage_clump(bm, trunk_at(z) + V((math.cos(ang) * r, math.sin(ang) * r, 0)), 0.4 + 0.3 * (1.0 - t), rng)
+    top = pts[-1]  # 幹の先(てっぺん)まで、細る葉の塊を重ねる
+    for k in range(6):
+        foliage_clump(bm, top + V((0, 0, -1.2 + 0.24 * k)), 0.28 - 0.035 * k, rng)
+    return bm
+
+
+def bark_material(name="HeroBark"):
+    """杉の皮: 縦に裂けた筋(上下に引き伸ばしたノイズ)。雨で濡れて暗く、少しつやがある。"""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Roughness'].default_value = 0.55
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    stretch = nt.nodes.new('ShaderNodeMapping')
+    stretch.inputs['Scale'].default_value = (14.0, 14.0, 0.8)  # 縦の筋
+    nt.links.new(coord.outputs['Object'], stretch.inputs['Vector'])
+    tex = nt.nodes.new('ShaderNodeTexNoise')
+    tex.inputs['Scale'].default_value = 3.0
+    tex.inputs['Detail'].default_value = 6.0
+    nt.links.new(stretch.outputs['Vector'], tex.inputs['Vector'])
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].position = 0.35
+    ramp.color_ramp.elements[0].color = (0.020, 0.014, 0.010, 1)
+    ramp.color_ramp.elements[1].position = 0.65
+    ramp.color_ramp.elements[1].color = (0.075, 0.048, 0.032, 1)  # 赤みのある茶(杉の皮)
+    nt.links.new(tex.outputs['Fac'], ramp.inputs['Fac'])
+    nt.links.new(ramp.outputs['Color'], bsdf.inputs['Base Color'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 0.6
+    nt.links.new(tex.outputs['Fac'], bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    return mat
+
+
+def hero_foliage_material():
+    """杉の葉: 後ろの林と同じ暗い緑。塊ごとの明暗と、細かい葉のまだら。"""
+    mat = bpy.data.materials.new("HeroFoliage")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Roughness'].default_value = 0.8
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    fine = nt.nodes.new('ShaderNodeTexVoronoi')  # 葉の粒
+    fine.inputs['Scale'].default_value = 6.0
+    nt.links.new(coord.outputs['Object'], fine.inputs['Vector'])
+    big = nt.nodes.new('ShaderNodeTexNoise')  # 塊ごとの明暗
+    big.inputs['Scale'].default_value = 0.4
+    nt.links.new(coord.outputs['Object'], big.inputs['Vector'])
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].color = (0.008, 0.018, 0.010, 1)
+    ramp.color_ramp.elements[1].color = (0.026, 0.040, 0.020, 1)
+    nt.links.new(big.outputs['Fac'], ramp.inputs['Fac'])
+    shade = nt.nodes.new('ShaderNodeMapRange')
+    shade.inputs['To Min'].default_value = 1.0
+    shade.inputs['To Max'].default_value = 0.4
+    nt.links.new(fine.outputs['Distance'], shade.inputs['Value'])
+    mul = nt.nodes.new('ShaderNodeMix')
+    mul.data_type = 'RGBA'
+    mul.blend_type = 'MULTIPLY'
+    mul.inputs['Factor'].default_value = 1.0
+    nt.links.new(ramp.outputs['Color'], mul.inputs['A'])
+    nt.links.new(shade.outputs['Result'], mul.inputs['B'])
+    nt.links.new(mul.outputs['Result'], bsdf.inputs['Base Color'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 0.9
+    nt.links.new(fine.outputs['Distance'], bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    return mat
+
+
+def wood_material():
+    """折れ口・裂けた跡の生木の色(白っぽい黄土色)。"""
+    return principled("HeroWood", (0.32, 0.24, 0.14), roughness=0.8)
+
+
+def add_scar(mat, facing_deg):
+    """杉の皮に、雷が通った跡(皮がはがれて生木が見える縦の筋)を足す。frame_stateのScar(0〜1)で現れ、ScarGlowで一瞬赤く光る。
+    facing_degは筋の向き(物体の座標で、+xから反時計回り)。カメラの方へ向ける。"""
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    base_color = bsdf.inputs['Base Color'].links[0].from_socket
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(coord.outputs['Object'], sep.inputs['Vector'])
+    ang = nt.nodes.new('ShaderNodeMath')  # 幹のまわりの角度
+    ang.operation = 'ARCTAN2'
+    nt.links.new(sep.outputs['Y'], ang.inputs[0])
+    nt.links.new(sep.outputs['X'], ang.inputs[1])
+    wob = nt.nodes.new('ShaderNodeTexNoise')  # 筋は上下で左右にゆれる
+    wob.inputs['Scale'].default_value = 0.35
+    nt.links.new(coord.outputs['Object'], wob.inputs['Vector'])
+    shift = nt.nodes.new('ShaderNodeMath')
+    shift.operation = 'MULTIPLY_ADD'
+    shift.inputs[1].default_value = 1.2
+    shift.inputs[2].default_value = -0.6 - math.radians(facing_deg)
+    nt.links.new(wob.outputs['Fac'], shift.inputs[0])
+    d = nt.nodes.new('ShaderNodeMath')
+    d.operation = 'ADD'
+    nt.links.new(ang.outputs[0], d.inputs[0])
+    nt.links.new(shift.outputs[0], d.inputs[1])
+    wrap = nt.nodes.new('ShaderNodeMath')  # -π〜πに折り返して、筋の中心からの角度に
+    wrap.operation = 'WRAP'
+    wrap.inputs[1].default_value = -math.pi
+    wrap.inputs[2].default_value = math.pi
+    nt.links.new(d.outputs[0], wrap.inputs[0])
+    absd = nt.nodes.new('ShaderNodeMath')
+    absd.operation = 'ABSOLUTE'
+    nt.links.new(wrap.outputs[0], absd.inputs[0])
+    band = nt.nodes.new('ShaderNodeMapRange')  # 幅は幹の約1/5周
+    band.inputs['From Min'].default_value = 0.50
+    band.inputs['From Max'].default_value = 0.40
+    nt.links.new(absd.outputs[0], band.inputs['Value'])
+    amount = nt.nodes.new('ShaderNodeValue')
+    amount.name = "Scar"
+    amount.outputs[0].default_value = 0.0
+    mask = nt.nodes.new('ShaderNodeMath')
+    mask.operation = 'MULTIPLY'
+    nt.links.new(band.outputs['Result'], mask.inputs[0])
+    nt.links.new(amount.outputs[0], mask.inputs[1])
+    mix = nt.nodes.new('ShaderNodeMix')
+    mix.data_type = 'RGBA'
+    mix.inputs['B'].default_value = (0.32, 0.24, 0.14, 1)
+    nt.links.new(mask.outputs[0], mix.inputs['Factor'])
+    nt.links.new(base_color, mix.inputs['A'])
+    nt.links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
+    glow = nt.nodes.new('ShaderNodeValue')
+    glow.name = "ScarGlow"
+    glow.outputs[0].default_value = 0.0
+    gmask = nt.nodes.new('ShaderNodeMath')
+    gmask.operation = 'MULTIPLY'
+    nt.links.new(band.outputs['Result'], gmask.inputs[0])
+    nt.links.new(glow.outputs[0], gmask.inputs[1])
+    bsdf.inputs['Emission Color'].default_value = (1.0, 0.35, 0.08, 1)  # 熱で赤く
+    nt.links.new(gmask.outputs[0], bsdf.inputs['Emission Strength'])
+
+
+def split_at(bm_src, z_cut, keep_below):
+    """幹を高さz_cutで切って、下(または上)だけを残す。切り口は、ささくれた木口でふさぐ(材質2)。"""
+    bm = bm_src.copy()
+    geom = list(bm.verts) + list(bm.edges) + list(bm.faces)
+    bmesh.ops.bisect_plane(bm, geom=geom, plane_co=(0, 0, z_cut), plane_no=(0, 0, 1))
+    drop = [f for f in bm.faces if (f.calc_center_median().z < z_cut) != keep_below]
+    bmesh.ops.delete(bm, geom=drop, context='FACES')
+    ring = [v for v in bm.verts if abs(v.co.z - z_cut) < 1e-4 and v.is_boundary]
+    if ring:
+        c = sum((v.co for v in ring), V()) / len(ring)
+        ring.sort(key=lambda v: math.atan2(v.co.y - c.y, v.co.x - c.x))
+        sign = 1.0 if keep_below else -1.0
+        tip = bm.verts.new(c + V((0, 0, sign * 0.15)))
+        rng = random.Random(11 if keep_below else 12)
+        for v in ring:  # ささくれ: 縁を上下にギザギザにずらし、少し内側へ(折れる前は重なって見えない)
+            v.co.z += sign * rng.uniform(0.0, 0.45)
+            v.co.x = c.x + (v.co.x - c.x) * 0.96
+            v.co.y = c.y + (v.co.y - c.y) * 0.96
+        for a, b in zip(ring, ring[1:] + ring[:1]):
+            f = bm.faces.new((a, b, tip) if keep_below else (b, a, tip))
+            f.material_index = 2
+    return bm
+
+
+def build_hero_tree(col, rng):
+    """オチの杉を1本(駐車場の縁の草地、林から離れて1本だけ高い)。折れる高さで「切り株」と「倒れる上の部分」に分ける。
+    上の部分の原点は折れる点(frame_stateで、ここを軸に倒す)。向きは回さない(物体の座標=世界の向き。裂けた跡をカメラへ向けるため)。"""
+    x, y = HERO_TREE_POS
+    ground = max(terrain_height(x, y), 0.0)
+    full = hero_tree_mesh(rng)
+    bark = bark_material()
+    facing = math.degrees(math.atan2(CAM_LOC[1] - y, CAM_LOC[0] - x))
+    add_scar(bark, facing)
+    mats = [bark, hero_foliage_material(), wood_material()]
+    stump = mesh_object("HeroStump", split_at(full, TREE_BREAK_Z, True), mats, col)
+    stump.location = (x, y, ground)
+    upper_bm = split_at(full, TREE_BREAK_Z, False)
+    full.free()
+    bmesh.ops.translate(upper_bm, verts=upper_bm.verts, vec=(0, 0, -TREE_BREAK_Z))
+    upper = mesh_object("HeroTree", upper_bm, mats, col)
+    upper.location = (x, y, ground + TREE_BREAK_Z)
+    upper.rotation_mode = 'QUATERNION'
+    top = V(upper.location) + max((v.co for v in upper.data.vertices), key=lambda p: p.z)  # 向きは回さないので、位置を足すだけ
+    print("[Stage1] hero tree faces:", len(upper.data.polygons) + len(stump.data.polygons), "top:", tuple(round(c, 2) for c in top))
+    return top
+
+
+STEAM_PUFFS = 26
+
+
+def build_steam(col, rng, base):
+    """雷が通った幹から噴き出す蒸気(幹の中の水分が一瞬で沸騰する)。体積の塊を幹の筋に沿って並べる。
+    動き(広がる・上がる・薄れる)はframe_stateで、落ちたフレームからの時間で決める。"""
+    mat = bpy.data.materials.new("Steam")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    vol = nt.nodes.new('ShaderNodeVolumePrincipled')
+    vol.inputs['Color'].default_value = (0.75, 0.76, 0.78, 1)
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    tex = nt.nodes.new('ShaderNodeTexNoise')  # 塊の中のむら
+    tex.inputs['Scale'].default_value = 2.5
+    tex.inputs['Detail'].default_value = 4.0
+    nt.links.new(coord.outputs['Object'], tex.inputs['Vector'])
+    grad = nt.nodes.new('ShaderNodeVectorMath')  # 縁へ向かって薄く(球の中心からの距離)
+    grad.operation = 'LENGTH'
+    nt.links.new(coord.outputs['Object'], grad.inputs[0])
+    edge = nt.nodes.new('ShaderNodeMapRange')
+    edge.inputs['From Min'].default_value = 1.0
+    edge.inputs['From Max'].default_value = 0.3
+    nt.links.new(grad.outputs['Value'], edge.inputs['Value'])
+    m1 = nt.nodes.new('ShaderNodeMath')
+    m1.operation = 'MULTIPLY'
+    nt.links.new(tex.outputs['Fac'], m1.inputs[0])
+    nt.links.new(edge.outputs['Result'], m1.inputs[1])
+    amount = nt.nodes.new('ShaderNodeValue')
+    amount.name = "SteamDensity"
+    amount.outputs[0].default_value = 0.0
+    m2 = nt.nodes.new('ShaderNodeMath')
+    m2.operation = 'MULTIPLY'
+    nt.links.new(m1.outputs[0], m2.inputs[0])
+    nt.links.new(amount.outputs[0], m2.inputs[1])
+    nt.links.new(m2.outputs[0], vol.inputs['Density'])
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    nt.links.new(vol.outputs[0], out.inputs['Volume'])
+    me = bpy.data.meshes.new("SteamPuff")
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(bm, subdivisions=2, radius=1.0)
+    bm.to_mesh(me)
+    bm.free()
+    me.materials.append(mat)
+    x, y, g = base
+    facing = math.atan2(CAM_LOC[1] - y, CAM_LOC[0] - x)
+    for k in range(STEAM_PUFFS):
+        z = TREE_BREAK_Z + (HERO_TREE_HEIGHT * 0.9 - TREE_BREAK_Z) * (k + rng.random()) / STEAM_PUFFS
+        a = facing + rng.gauss(0, 0.5)
+        r = 0.25 + 0.4 * rng.random()
+        o = link(bpy.data.objects.new(f"Steam{k:02d}", me), col)
+        o.location = (x + r * math.cos(a), y + r * math.sin(a), g + z)
+        o["origin"] = tuple(o.location)
+        o["size"] = rng.uniform(0.5, 0.9)
+        o["drift"] = (rng.gauss(0, 0.3), rng.gauss(0, 0.3), rng.uniform(0.4, 0.9))  # 上がる速さ[m/s]と横の流れ
+        o.scale = (0.01, 0.01, 0.01)
+        o.visible_shadow = False
+    col.hide_render = True
+
+
+MID_TREES = 9  # 杉と林のあいだの木(杉が1本だけ浮かないように)
+
+
+def build_mid_trees(col, rng):
+    """杉と林のあいだ(約48〜72m)に、同じ作りの少し低い杉を散らす。オチの杉が一番近く一番高いまま(雷が落ちる理由)にする。"""
+    variants = []
+    bark = bark_material("MidBark")  # 杉の皮(裂けた跡は付けない)
+    for k in range(3):
+        me = bpy.data.meshes.new(f"MidTree{k}")
+        hero_tree_mesh(random.Random(SEED + 10 + k), HERO_TREE_HEIGHT).to_mesh(me)
+        me.materials.append(bark)
+        me.materials.append(bpy.data.materials["HeroFoliage"])
+        variants.append(me)
+    hero = V(HERO_TREE_POS)
+    placed = []
+    for _ in range(5000):
+        r = rng.uniform(48.0, 72.0)
+        a = rng.uniform(0, 2 * math.pi)
+        x, y = r * math.cos(a), r * math.sin(a)
+        if abs(x) < LOT_HALF[0] + 4 and abs(y) < LOT_HALF[1] + 4:
+            continue
+        if not in_camera_view(x, y, 4.0) or (V((x, y)) - hero).length < 10.0:
+            continue
+        if any((V((x, y)) - q).length < 7.0 for q in placed):
+            continue
+        o = link(bpy.data.objects.new(f"MidTree{len(placed):02d}", variants[len(placed) % 3]), col)
+        s = rng.uniform(0.62, 0.82)  # 杉(18m)より低い
+        o.scale = (s, s, s)
+        o.location = (x, y, max(terrain_height(x, y), 0.0))
+        o.rotation_euler = (0, 0, rng.uniform(0, 6.3))
+        placed.append(V((x, y)))
+        if len(placed) >= MID_TREES:
+            break
+    print("[Stage1] mid trees:", len(placed))
+
+
 def bolt_path(rng, start, end, segments, jitter):
     """startからendへのギザギザの道(中点を横へずらしていく)。jitterは長さに対するずれの割合。"""
     pts = [V(start), V(end)]
@@ -1037,9 +1408,10 @@ def bolt_curve(name, pts, radius_fn, mat, col):
     return obj
 
 
-def build_lightning(col, rng):
-    """雷: 雲から屋根の真ん中へ下りる主の道と、途中から分かれて空中で消える枝。光る管(太さは遠いほど太く、画面で数画素)。
-    画面全体を照らす光は、道の途中に置いた点光源(frame_stateで落ちるフレームだけ点ける)。"""
+def lightning_material():
+    mat = bpy.data.materials.get("Lightning")
+    if mat is not None:
+        return mat
     mat = bpy.data.materials.new("Lightning")
     mat.use_nodes = True
     nt = mat.node_tree
@@ -1049,7 +1421,14 @@ def build_lightning(col, rng):
     em.inputs['Strength'].default_value = 120.0
     out = nt.nodes.new('ShaderNodeOutputMaterial')
     nt.links.new(em.outputs[0], out.inputs[0])
-    top, hit = V(LIGHTNING_TOP), V(STRIKE_POINT)
+    return mat
+
+
+def build_bolt(col, rng, top, hit, prefix):
+    """雲(top)から落ちる点(hit)へ下りる主の道と、途中から分かれて空中で消える枝。光る管(太さは遠いほど太く、画面で数画素)。
+    画面全体を照らす光は、道の途中に置いた点光源(frame_stateで落ちるフレームだけ点ける)。"""
+    mat = lightning_material()
+    top, hit = V(top), V(hit)
     # 手前(カメラの近く)ほど画面で大きく見えるので、区間を分けてそれぞれギザギザにする(3Dで均等に分けると、手前がまっすぐな棒になる)
     toward = (top - hit).normalized()
     p80, p12, p1 = (hit + toward * d for d in (80.0, 12.0, 0.6))
@@ -1058,7 +1437,7 @@ def build_lightning(col, rng):
 
     def width(p):
         return 0.02 + 0.0005 * (p - V(CAM_LOC)).length  # 遠くても画面で同じくらいの太さ(1画素≒距離の0.0006倍)
-    bolt_curve("LightningMain", main, lambda t, p: width(p), mat, col)
+    bolt_curve(f"{prefix}Main", main, lambda t, p: width(p), mat, col)
     for k in range(9):  # 枝: 上の方ほど多く長い
         i = int(len(main) * rng.uniform(0.03, 0.45))
         a = main[i]
@@ -1067,13 +1446,18 @@ def build_lightning(col, rng):
         length = (a - hit).length * rng.uniform(0.12, 0.30)
         end = a + (down * 0.6 + side * rng.uniform(0.5, 1.1) + V((0, 0, -0.3))).normalized() * length
         pts = bolt_path(rng, a, end, 6, 0.16)
-        bolt_curve(f"LightningBranch{k}", pts, lambda t, p: width(p) * 0.45 * (1.0 - 0.8 * t), mat, col)
-    glow = bpy.data.lights.new("LightningGlow", 'POINT')  # 雷の道のすぐ上の光(はっきりした影を落とす)
+        bolt_curve(f"{prefix}Branch{k}", pts, lambda t, p: width(p) * 0.45 * (1.0 - 0.8 * t), mat, col)
+    glow = bpy.data.lights.new(f"{prefix}Glow", 'POINT')  # 雷の道のすぐ上の光(はっきりした影を落とす)
     glow.energy = 0.0
     glow.shadow_soft_size = 0.5
     glow.color = (0.85, 0.85, 1.0)
-    link(bpy.data.objects.new("LightningGlow", glow), col).location = hit + (top - hit).normalized() * 25.0
+    link(bpy.data.objects.new(f"{prefix}Glow", glow), col).location = hit + (top - hit).normalized() * 25.0
     col.hide_render = True
+
+
+def build_lightning(col, rng):
+    """1回目の雷(車の屋根の真ん中へ)。"""
+    build_bolt(col, rng, LIGHTNING_TOP, STRIKE_POINT, "Lightning")
 
 
 CURRENT_LINES = os.path.join(os.path.dirname(WIP_BLEND), "..", "cache", "current_lines.npz")
@@ -1186,10 +1570,15 @@ def main():
     build_ground(collection("Ground"))
     build_terrain(collection("Terrain"))
     build_trees(collection("Trees"), rng)
+    hero_top = build_hero_tree(collection("HeroTree"), random.Random(SEED + 1))  # 別の乱数(他の物の配置を変えない)
+    build_mid_trees(collection("Trees"), random.Random(SEED + 2))
     build_car(collection("Car"))
     build_camera(collection("Camera"))
     build_rain(collection("Rain"), rng)
     build_lightning(collection("Lightning"), rng)
+    build_bolt(collection("TreeLightning"), random.Random(SEED + 3), TREE_LIGHTNING_TOP, hero_top, "TreeLightning")
+    x, y = HERO_TREE_POS
+    build_steam(collection("Steam"), random.Random(SEED + 4), (x, y, max(terrain_height(x, y), 0.0)))
     bpy.context.view_layer.update()
     build_current_lines(collection("CurrentLines"), bpy.data.objects["CarBody"])
     # 映り込み用のプローブ: 無いと車体の下半分にも空が映って白く飛ぶ(地面の暗さを拾わせる)

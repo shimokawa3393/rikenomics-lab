@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bpy
 import numpy as np
-from shots import CAM_LENS, CAM_LOC, CAM_TARGET, FPS, RESOLUTION, SKY_HDRI, STRIKE_FRAME
+from mathutils import Quaternion, Vector
+from shots import (CAM_LENS, CAM_LOC, CAM_TARGET, FPS, RESOLUTION, SKY_HDRI, STRIKE_FRAME, TREE_BREAK_Z, TREE_FALL_DIR_DEG,
+                   TREE_FALL_START, TREE_STRIKE_FRAME)
 
 # 雷雨の空: 曇天のHDRIを暗く落とし、少し青みのある灰色に寄せる
 SKY_ROTATION_DEG = 200.0
@@ -157,26 +159,96 @@ def build_compositor(scene, clear=False):
     ng.links.new(grain.outputs['Result'], out.inputs['Image'])
 
 
-def flash_amount(frame):
-    return FLASH_CURVE.get(frame - STRIKE_FRAME, 0.0)
+STRIKES = (("Lightning", STRIKE_FRAME), ("TreeLightning", TREE_STRIKE_FRAME))  # (雷のコレクション, 落ちるフレーム)
 
 
-def apply_flash(scene, flash):
-    """雷の閃光: 雷の道を見せ、点光源を点け、空を明るくする。"""
-    col = bpy.data.collections.get("Lightning")
-    if col is not None:
-        col.hide_render = flash <= 0.0
-    light = bpy.data.lights.get("LightningGlow")
-    if light is not None:
-        light.energy = FLASH_LIGHT * flash
+def flash_amount(frame, strike=STRIKE_FRAME):
+    return FLASH_CURVE.get(frame - strike, 0.0)
+
+
+def apply_flash(scene, frame):
+    """雷の閃光: 雷の道を見せ、点光源を点け、空を明るくする(車と杉の2回)。"""
+    sky = 0.0
+    for name, strike in STRIKES:
+        flash = flash_amount(frame, strike)
+        col = bpy.data.collections.get(name)
+        if col is not None:
+            col.hide_render = flash <= 0.0
+        light = bpy.data.lights.get(f"{name}Glow")
+        if light is not None:
+            light.energy = FLASH_LIGHT * flash
+        sky = max(sky, flash)
     node = scene.world.node_tree.nodes.get("SkyStrength")
     if node is not None:
         if "base" not in node:
             node["base"] = (node.inputs['To Min'].default_value, node.inputs['To Max'].default_value)
         lo, hi = node["base"]
-        k = 1.0 + (FLASH_SKY - 1.0) * flash
+        k = 1.0 + (FLASH_SKY - 1.0) * sky
         node.inputs['To Min'].default_value = lo * k
         node.inputs['To Max'].default_value = hi * k
+
+
+# 杉が倒れる: 折れた点を軸に回る長さLの棒(θ'' = (3g/2L) sinθ)。真っすぐのまま、裂けたはずみの小さな回転だけで倒れはじめる。
+# 傾きが小さいうちはほとんど動かず(最初の1秒で約4°)、そこから一気に倒れる。最初から傾けると、その1フレームで先端が約1m跳んでカクッとなる
+FALL_LENGTH = 16.0
+FALL_START_ANGLE = 0.0  # [rad]
+FALL_START_SPEED = 0.06  # [rad/s]。着地は約4.1秒後(800フレームごろ)
+FALL_LAND_DEG = 92.0  # 枝が地面に着く角度
+BOUNCE_DEG = 4.0  # 着いたときの跳ね返り
+STEAM_DENSITY = 4.0
+STEAM_FADE = 2.5  # 蒸気が薄れる時間[s]
+SCAR_GLOW = 3.0  # 裂けた跡が熱で赤く光る強さ(すぐ消える)
+
+
+def _fall_table():
+    g, dt = 9.81, 1.0 / (FPS * 10)
+    th, om, t, table = FALL_START_ANGLE, FALL_START_SPEED, 0.0, [(0.0, FALL_START_ANGLE)]
+    while th < math.radians(FALL_LAND_DEG):
+        om += 1.5 * g / FALL_LENGTH * math.sin(th) * dt
+        th += om * dt
+        t += dt
+        table.append((t, th))
+    return table
+
+
+_FALL = _fall_table()
+FALL_DURATION = _FALL[-1][0]
+
+
+def fall_angle(frame):
+    """倒れはじめてからの角度[rad]。地面に着いたら、小さく跳ねて止まる。"""
+    t = (frame - TREE_FALL_START) / FPS
+    if t <= 0:
+        return 0.0
+    if t < FALL_DURATION:
+        return next(th for tt, th in _FALL if tt >= t)
+    u = t - FALL_DURATION
+    return math.radians(FALL_LAND_DEG) - math.radians(BOUNCE_DEG) * abs(math.sin(2 * math.pi * 2.5 * u)) * math.exp(-u / 0.25)
+
+
+def apply_tree(frame):
+    """杉に落ちてから: 裂けた跡が現れて一瞬赤く光り、幹から蒸気が噴き出し、一拍おいて上の部分が倒れる。"""
+    t = (frame - TREE_STRIKE_FRAME) / FPS
+    bark = bpy.data.materials.get("HeroBark")
+    if bark is not None:
+        nodes = bark.node_tree.nodes
+        nodes["Scar"].outputs[0].default_value = 1.0 if t >= 0 else 0.0
+        nodes["ScarGlow"].outputs[0].default_value = SCAR_GLOW * math.exp(-t / 0.25) if t >= 0 else 0.0
+    steam = bpy.data.collections.get("Steam")
+    if steam is not None:
+        steam.hide_render = t < 0
+        if t >= 0:
+            bpy.data.materials["Steam"].node_tree.nodes["SteamDensity"].outputs[0].default_value = (
+                STEAM_DENSITY * (1.0 - math.exp(-t / 0.08)) * math.exp(-t / STEAM_FADE))
+            for o in steam.objects:
+                grow = o["size"] * (0.4 + 1.6 * (1.0 - math.exp(-t / 0.6)))
+                o.scale = (grow, grow, grow)
+                o.location = Vector(o["origin"]) + Vector(o["drift"]) * t
+    tree = bpy.data.objects.get("HeroTree")
+    if tree is not None:
+        a = math.radians(TREE_FALL_DIR_DEG)
+        axis = Vector((0, 0, 1)).cross(Vector((math.cos(a), math.sin(a), 0)))
+        tree.rotation_quaternion = Quaternion(axis, fall_angle(frame))
 
 
 _rain_cache = {}
@@ -234,7 +306,8 @@ def apply_frame(scene, frame):
     grain = scene.compositing_node_group.nodes.get("GrainNoise")
     if grain is not None:
         grain.inputs['W'].default_value = frame * 1.37
-    apply_flash(scene, flash_amount(frame))
+    apply_flash(scene, frame)
+    apply_tree(frame)
     scene.frame_set(frame)
 
 
@@ -282,3 +355,8 @@ def setup_render(scene, resolution_percentage=100, clear=False):
     scene.render.resolution_x, scene.render.resolution_y = RESOLUTION
     scene.render.resolution_percentage = resolution_percentage
     scene.render.image_settings.file_format = 'PNG'
+    # 杉の蒸気(体積)。カメラから杉まで(約48m)を細かく、影は切る
+    scene.eevee.volumetric_start = 30.0
+    scene.eevee.volumetric_end = 70.0
+    scene.eevee.volumetric_tile_size = '4'
+    scene.eevee.use_volumetric_shadows = False

@@ -52,3 +52,5 @@ ep4/cache/
 # ep5の計算のキャッシュ(スクリプトから再生成できる)
 ep5/cache/
 ep5/preview_frames/
+ep5/draft_frames/
+ep5/frames/
