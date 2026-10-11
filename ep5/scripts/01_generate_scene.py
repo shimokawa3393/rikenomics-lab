@@ -639,18 +639,19 @@ def asphalt_material():
     puddle_noise.inputs['Detail'].default_value = 4.0
     nt.links.new(coord.outputs['Object'], puddle_noise.inputs['Vector'])
     puddle = nt.nodes.new('ShaderNodeMapRange')
-    puddle.inputs['From Min'].default_value = 0.44
-    puddle.inputs['From Max'].default_value = 0.52
+    puddle.inputs['From Min'].default_value = 0.52  # 水たまりは所々だけ(広いと路面全体が鏡になり映り込みすぎる)
+    puddle.inputs['From Max'].default_value = 0.58
     nt.links.new(puddle_noise.outputs['Fac'], puddle.inputs['Value'])
     wet_rough = nt.nodes.new('ShaderNodeMapRange')  # 濡れたアスファルト全体のつや
-    wet_rough.inputs['To Min'].default_value = 0.03  # EEVEEは粗いと映り込みが消える(Cyclesより低めに)
-    wet_rough.inputs['To Max'].default_value = 0.10
+    wet_rough.inputs['To Min'].default_value = 0.08  # 濡れた路面は少しぼやけた映り込み(0.03〜0.10はほぼ鏡で映り込みすぎ、0.15〜0.30は乾いて見えた)
+    wet_rough.inputs['To Max'].default_value = 0.18
     nt.links.new(rough.outputs['Color'], wet_rough.inputs['Value'])
     r_mix = nt.nodes.new('ShaderNodeMix')
     r_mix.inputs['B'].default_value = 0.02
     nt.links.new(puddle.outputs['Result'], r_mix.inputs['Factor'])
     nt.links.new(wet_rough.outputs['Result'], r_mix.inputs['A'])
     nt.links.new(r_mix.outputs['Result'], bsdf.inputs['Roughness'])
+    bsdf.inputs['Specular IOR Level'].default_value = 0.40  # 反射を少し弱める(既定0.5)
     nmap = nt.nodes.new('ShaderNodeNormalMap')
     nt.links.new(nor.outputs['Color'], nmap.inputs['Color'])
     n_strength = nt.nodes.new('ShaderNodeMapRange')  # 水たまりでは凹凸が消える
@@ -908,6 +909,7 @@ def conifer_material():
     nt = mat.node_tree
     bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
     bsdf.inputs['Roughness'].default_value = 0.85
+    bsdf.inputs['Specular IOR Level'].default_value = 0.15  # 閃光で葉の上側が白く光ると、雪をかぶったように見える
     info = nt.nodes.new('ShaderNodeObjectInfo')
     ramp = nt.nodes.new('ShaderNodeValToRGB')  # 木ごとの色(濃い緑〜少し青みの緑〜少し黄みの緑)
     ramp.color_ramp.elements[0].color = (0.010, 0.022, 0.013, 1)
@@ -1138,6 +1140,7 @@ def hero_foliage_material():
     nt = mat.node_tree
     bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
     bsdf.inputs['Roughness'].default_value = 0.8
+    bsdf.inputs['Specular IOR Level'].default_value = 0.15  # 閃光で白く光ると雪に見える
     coord = nt.nodes.new('ShaderNodeTexCoord')
     fine = nt.nodes.new('ShaderNodeTexVoronoi')  # 葉の粒
     fine.inputs['Scale'].default_value = 6.0
@@ -1168,8 +1171,8 @@ def hero_foliage_material():
 
 
 def wood_material():
-    """折れ口・裂けた跡の生木の色(白っぽい黄土色)。"""
-    return principled("HeroWood", (0.32, 0.24, 0.14), roughness=0.8)
+    """折れ口・裂けた跡の生木の色。雨に濡れた暗い茶(明るい黄土色だと、切った材木や木の台に見えた)。"""
+    return principled("HeroWood", (0.10, 0.07, 0.045), roughness=0.7)
 
 
 def add_scar(mat, facing_deg):
@@ -1218,7 +1221,7 @@ def add_scar(mat, facing_deg):
     nt.links.new(amount.outputs[0], mask.inputs[1])
     mix = nt.nodes.new('ShaderNodeMix')
     mix.data_type = 'RGBA'
-    mix.inputs['B'].default_value = (0.32, 0.24, 0.14, 1)
+    mix.inputs['B'].default_value = (0.12, 0.085, 0.05, 1)  # 濡れた生木(HeroWoodと同じくらい暗く)
     nt.links.new(mask.outputs[0], mix.inputs['Factor'])
     nt.links.new(base_color, mix.inputs['A'])
     nt.links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
@@ -1302,7 +1305,7 @@ def build_steam(col, rng, base):
     nt.links.new(coord.outputs['Object'], grad.inputs[0])
     edge = nt.nodes.new('ShaderNodeMapRange')
     edge.inputs['From Min'].default_value = 1.0
-    edge.inputs['From Max'].default_value = 0.3
+    edge.inputs['From Max'].default_value = 0.0  # 中心まで少しずつ濃く(縁がはっきりすると丸い玉に見える)
     nt.links.new(grad.outputs['Value'], edge.inputs['Value'])
     m1 = nt.nodes.new('ShaderNodeMath')
     m1.operation = 'MULTIPLY'
@@ -1464,21 +1467,164 @@ CURRENT_LINES = os.path.join(os.path.dirname(WIP_BLEND), "..", "cache", "current
 CURRENT_COLOR = (0.35, 0.80, 1.0)  # 電流の筋の色(参考画像3の青白い光)
 
 
-def build_current_lines(col, body):
-    """電流の光の筋(03d_current_lines.py で計算した流線)。ボディの表面から少し浮かせた細い光る管。
-    1本の筋が同じ量の電流を運ぶので、筋の密度=電流の多さ。ふだんは隠し、frame_stateで出す。"""
-    if not os.path.exists(CURRENT_LINES):
-        print("[Stage1] current lines: no cache (run 03b/03d)")
-        return
+CURRENT_RADIUS = 0.0025  # 筋の太さ(半径)[m]
+TIRE_PATH_R = 0.33  # タイヤの側面を回る半径(外の縁は5cm丸めてあるので、その内側)
+RIPPLE_SIZE = 1.8  # 路面に広がる光の円盤の半径[m]
+
+
+def current_material():
+    """電流の筋: 落雷点からの道のり(UVのu[m])が先端Frontより手前だけ光る。先端は明るく、全体にゆっくり流れる明暗(Phase)。
+    強さ(Emission)はframe_state.apply_scienceが決める。"""
     mat = bpy.data.materials.new("CurrentLine")
     mat.use_nodes = True
     nt = mat.node_tree
     nt.nodes.clear()
     em = nt.nodes.new('ShaderNodeEmission')
     em.name = "Emission"
-    em.inputs['Color'].default_value = (*CURRENT_COLOR, 1)
     em.inputs['Strength'].default_value = 25.0
     nt.links.new(em.outputs[0], nt.nodes.new('ShaderNodeOutputMaterial').inputs[0])
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.uv_map = "Flow"
+    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(uv.outputs['UV'], sep.inputs['Vector'])
+    front = nt.nodes.new('ShaderNodeValue')
+    front.name = "Front"
+    front.outputs[0].default_value = 100.0
+    behind = nt.nodes.new('ShaderNodeMath')  # 先端からの距離(正: 先端より手前=もう電流が来た所)
+    behind.operation = 'SUBTRACT'
+    nt.links.new(front.outputs[0], behind.inputs[0])
+    nt.links.new(sep.outputs['X'], behind.inputs[1])
+
+    def ramp(src, a, b, lo, hi):
+        n = nt.nodes.new('ShaderNodeMapRange')
+        n.inputs['From Min'].default_value, n.inputs['From Max'].default_value = a, b
+        n.inputs['To Min'].default_value, n.inputs['To Max'].default_value = lo, hi
+        nt.links.new(src, n.inputs['Value'])
+        return n.outputs['Result']
+    reveal = ramp(behind.outputs[0], -0.03, 0.0, 0.0, 1.0)
+    head = ramp(behind.outputs[0], 0.0, 0.35, 2.5, 0.0)  # 先端の明るい頭
+    phase = nt.nodes.new('ShaderNodeValue')
+    phase.name = "Phase"
+    wave = nt.nodes.new('ShaderNodeMath')  # 流れる明暗: sin(2π(u - Phase)/0.6)
+    wave.operation = 'SUBTRACT'
+    nt.links.new(sep.outputs['X'], wave.inputs[0])
+    nt.links.new(phase.outputs[0], wave.inputs[1])
+    sw = nt.nodes.new('ShaderNodeMath')
+    sw.operation = 'MULTIPLY'
+    sw.inputs[1].default_value = 2 * math.pi / 0.6
+    nt.links.new(wave.outputs[0], sw.inputs[0])
+    sn = nt.nodes.new('ShaderNodeMath')
+    sn.operation = 'SINE'
+    nt.links.new(sw.outputs[0], sn.inputs[0])
+    flow = ramp(sn.outputs[0], -1.0, 1.0, 0.65, 1.0)
+    body = nt.nodes.new('ShaderNodeMath')
+    body.operation = 'ADD'
+    nt.links.new(flow, body.inputs[0])
+    nt.links.new(head, body.inputs[1])
+    lit = nt.nodes.new('ShaderNodeMath')
+    lit.operation = 'MULTIPLY'
+    nt.links.new(body.outputs[0], lit.inputs[0])
+    nt.links.new(reveal, lit.inputs[1])
+    col = nt.nodes.new('ShaderNodeMix')
+    col.data_type = 'RGBA'
+    col.blend_type = 'MULTIPLY'
+    col.inputs['Factor'].default_value = 1.0
+    col.inputs['A'].default_value = (*CURRENT_COLOR, 1)
+    comb = nt.nodes.new('ShaderNodeCombineXYZ')
+    for k in ('X', 'Y', 'Z'):
+        nt.links.new(lit.outputs[0], comb.inputs[k])
+    nt.links.new(comb.outputs[0], col.inputs['B'])
+    nt.links.new(col.outputs['Result'], em.inputs['Color'])
+    return mat
+
+
+def ripple_material():
+    """路面に広がる光: 接地点から広がる輪(半径RippleR)と、その内側の淡い光。Fadeで薄れる。"""
+    mat = bpy.data.materials.new("CurrentGround")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    em = nt.nodes.new('ShaderNodeEmission')
+    em.inputs['Color'].default_value = (*CURRENT_COLOR, 1)
+    nt.links.new(em.outputs[0], nt.nodes.new('ShaderNodeOutputMaterial').inputs[0])
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    length = nt.nodes.new('ShaderNodeVectorMath')
+    length.operation = 'LENGTH'
+    nt.links.new(coord.outputs['Object'], length.inputs[0])
+    attr = nt.nodes.new('ShaderNodeAttribute')  # 輪ごとの半径と明るさ(物体のプロパティ、frame_stateで動かす)
+    attr.attribute_type = 'OBJECT'
+    attr.attribute_name = "ripple_r"
+    fade = nt.nodes.new('ShaderNodeAttribute')
+    fade.attribute_type = 'OBJECT'
+    fade.attribute_name = "ripple_fade"
+    noise_t = nt.nodes.new('ShaderNodeTexNoise')  # 濡れた路面の水たまりのむら
+    noise_t.inputs['Scale'].default_value = 3.0
+    nt.links.new(coord.outputs['Object'], noise_t.inputs['Vector'])
+    d = nt.nodes.new('ShaderNodeMath')
+    d.operation = 'SUBTRACT'
+    nt.links.new(length.outputs['Value'], d.inputs[0])
+    nt.links.new(attr.outputs['Fac'], d.inputs[1])
+    ad = nt.nodes.new('ShaderNodeMath')
+    ad.operation = 'ABSOLUTE'
+    nt.links.new(d.outputs[0], ad.inputs[0])
+    ring = nt.nodes.new('ShaderNodeMapRange')
+    ring.inputs['From Min'].default_value, ring.inputs['From Max'].default_value = 0.0, 0.30  # 縁はぼかす(細い線はSFっぽい)
+    ring.inputs['To Min'].default_value, ring.inputs['To Max'].default_value = 0.6, 0.0
+    nt.links.new(ad.outputs[0], ring.inputs['Value'])
+    inner = nt.nodes.new('ShaderNodeMath')  # 輪の内側: 中心ほど明るい
+    inner.operation = 'DIVIDE'
+    nt.links.new(length.outputs['Value'], inner.inputs[0])
+    nt.links.new(attr.outputs['Fac'], inner.inputs[1])
+    inner_r = nt.nodes.new('ShaderNodeMapRange')
+    inner_r.inputs['From Min'].default_value, inner_r.inputs['From Max'].default_value = 0.0, 1.0
+    inner_r.inputs['To Min'].default_value, inner_r.inputs['To Max'].default_value = 0.6, 0.0
+    nt.links.new(inner.outputs[0], inner_r.inputs['Value'])
+    add = nt.nodes.new('ShaderNodeMath')
+    add.operation = 'ADD'
+    nt.links.new(ring.outputs['Result'], add.inputs[0])
+    nt.links.new(inner_r.outputs['Result'], add.inputs[1])
+    mottle = nt.nodes.new('ShaderNodeMapRange')
+    mottle.inputs['To Min'].default_value = 0.3
+    nt.links.new(noise_t.outputs['Fac'], mottle.inputs['Value'])
+    m1 = nt.nodes.new('ShaderNodeMath')
+    m1.operation = 'MULTIPLY'
+    nt.links.new(add.outputs[0], m1.inputs[0])
+    nt.links.new(mottle.outputs['Result'], m1.inputs[1])
+    m2 = nt.nodes.new('ShaderNodeMath')
+    m2.operation = 'MULTIPLY'
+    nt.links.new(m1.outputs[0], m2.inputs[0])
+    nt.links.new(fade.outputs['Fac'], m2.inputs[1])
+    nt.links.new(m2.outputs[0], em.inputs['Strength'])
+    return mat
+
+
+def tire_path(p_end, ay):
+    """筋の終わり(タイヤハウスの縁)から、タイヤの外側の面を回って接地点へ。"""
+    side = 1.0 if p_end.x > 0 else -1.0
+    x_face = side * (CAR_WIDTH / 2 - 0.035 + 0.008)
+    a0 = math.atan2(p_end.z - WHEEL_RADIUS, p_end.y - ay)
+    a1 = -math.pi / 2
+    r0 = math.hypot(p_end.z - WHEEL_RADIUS, p_end.y - ay)
+    n = 24
+    pts = []
+    for k in range(1, n + 1):
+        u = k / n
+        a = a0 + (a1 - a0) * u
+        r = r0 + (TIRE_PATH_R - r0) * min(1.0, u * 3)
+        x = p_end.x + (x_face - p_end.x) * min(1.0, u * 3)
+        pts.append(V((x, ay + r * math.cos(a), WHEEL_RADIUS + r * math.sin(a))))
+    pts.append(V((x_face, ay, 0.004)))  # 接地点へ下りる
+    return pts
+
+
+def build_current_lines(col, body):
+    """電流の光の筋(03d_current_lines.py で計算した流線)。ボディの表面から少し浮かせた細い光る管で、
+    タイヤの外側を回って接地点まで延ばす。UVマップ「Flow」のuに落雷点からの道のり[m]を入れ、先端が伸びる動きに使う。
+    1本の筋が同じ量の電流を運ぶので、筋の密度=電流の多さ。接地点には路面に広がる光の円盤を置く。ふだんは隠し、frame_stateで出す。"""
+    if not os.path.exists(CURRENT_LINES):
+        print("[Stage1] current lines: no cache (run 03b/03d)")
+        return
+    mat = current_material()
     # 表面の法線を引くためのBVH(ワールド座標)
     bm = bmesh.new()
     bm.from_mesh(body.data)
@@ -1486,23 +1632,58 @@ def build_current_lines(col, body):
     bvh = BVHTree.FromBMesh(bm)
     bm.free()
     data = np.load(CURRENT_LINES)
-    cu = bpy.data.curves.new("CurrentLines", 'CURVE')
-    cu.dimensions = '3D'
-    cu.bevel_depth = 0.0025
-    cu.bevel_resolution = 2
+    axles = [ay - CAR_LENGTH / 2 for ay in AXLES_Y]
+    bm = bmesh.new()
+    uv_layer = bm.loops.layers.uv.new("Flow")
+    ground_s = {}  # 接地点ごとの、電流が着くまでの道のり
+    sides = 6
     for k in data.files:
-        pts = data[k][::2]
-        sp = cu.splines.new('POLY')
-        sp.points.add(len(pts) - 1)
-        for i, p in enumerate(pts):
+        raw = data[k][::2]
+        pts = []
+        for p in raw:
             loc, n, _, _ = bvh.find_nearest(V(p))
-            q = V(p) + n * 0.006 if loc is not None else V(p)  # 表面に埋もれないよう6mm浮かせる
-            sp.points[i].co = (*q, 1.0)
-    cu.materials.append(mat)
-    obj = link(bpy.data.objects.new("CurrentLines", cu), col)
+            pts.append(V(p) + n * 0.006 if loc is not None else V(p))  # 表面に埋もれないよう6mm浮かせる
+        ay = min(axles, key=lambda a: abs(a - pts[-1].y))
+        pts += tire_path(pts[-1], ay)
+        dist = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            dist.append(dist[-1] + (b - a).length)
+        key = (1 if pts[-1].x > 0 else -1, axles.index(ay))
+        ground_s.setdefault(key, []).append(dist[-1])
+        rings = []
+        for i, p in enumerate(pts):
+            d = (pts[min(i + 1, len(pts) - 1)] - pts[max(i - 1, 0)]).normalized()
+            a = d.orthogonal().normalized()
+            b = d.cross(a)
+            rings.append([bm.verts.new(p + (a * math.cos(2 * math.pi * j / sides) + b * math.sin(2 * math.pi * j / sides)) * CURRENT_RADIUS)
+                          for j in range(sides)])
+        for i, (r0, r1) in enumerate(zip(rings, rings[1:])):
+            for j in range(sides):
+                f = bm.faces.new((r0[j], r0[(j + 1) % sides], r1[(j + 1) % sides], r1[j]))
+                for loop in f.loops:
+                    s = dist[i] if loop.vert in r0 else dist[i + 1]
+                    loop[uv_layer].uv = (s, 0.0)
+    obj = mesh_object("CurrentLines", bm, [mat], col)
     obj.visible_shadow = False
+    mat["length"] = max(max(v) for v in ground_s.values())
+    # 路面に広がる光(4つの接地点)
+    rmat = ripple_material()
+    bm = bmesh.new()
+    bmesh.ops.create_circle(bm, cap_ends=True, segments=48, radius=RIPPLE_SIZE)
+    me = bpy.data.meshes.new("CurrentRipple")
+    bm.to_mesh(me)
+    bm.free()
+    me.materials.append(rmat)
+    for (side, i), ss in ground_s.items():
+        o = link(bpy.data.objects.new(f"CurrentRipple{'R' if side > 0 else 'L'}{i}", me), col)
+        o.location = (side * (CAR_WIDTH / 2 - 0.035 - WHEEL_WIDTH / 2), axles[i], 0.005)
+        o["arrive"] = sorted(ss)[len(ss) // 4]  # 筋の4分の1が着いたら広がりはじめる
+        o["ripple_r"] = 0.0
+        o["ripple_fade"] = 0.0
+        o.visible_shadow = False
     col.hide_render = True
-    print("[Stage1] current lines:", len(data.files))
+    print("[Stage1] current lines:", len(data.files), "longest path:", round(mat["length"], 2),
+          "arrive:", {k: round(min(v), 2) for k, v in ground_s.items()})
 
 
 def build_rain(col, rng):

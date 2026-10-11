@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bpy
 import numpy as np
 from mathutils import Quaternion, Vector
-from shots import (CAM_LENS, CAM_LOC, CAM_TARGET, FPS, RESOLUTION, SKY_HDRI, STRIKE_FRAME, TREE_BREAK_Z, TREE_FALL_DIR_DEG,
+from shots import (CAMERA_KEYS, CAM_LENS, CAM_LOC, CAM_TARGET, FPS, RAIN_HIDE, RAIN_SHOW, FREEZE_END, FREEZE_FRAME, REPLAY_FRAME, RESOLUTION, SKY_HDRI, STRIKE_FRAME, TREE_BREAK_Z, TREE_FALL_DIR_DEG,
                    TREE_FALL_START, TREE_STRIKE_FRAME)
 
 # 雷雨の空: 曇天のHDRIを暗く落とし、少し青みのある灰色に寄せる
@@ -34,8 +34,10 @@ EXPOSURE = 0.6  # 全体の明るさ(段)。「全体的に少し明るく」
 FLASH_CURVE = {0: 1.0, 1: 0.35, 2: 0.8, 3: 0.2, 4: 0.05}
 FLASH_SKY = 1.3  # 閃光のとき、空の明るさを何倍にするか(雲の中で光る)
 FLASH_LIGHT = 4.0e5  # 雷の道のすぐ上の点光源の強さ[W]
+FLASH_LIGHT_SCALE = {"TreeLightning": 0.35}  # 杉の雷は林のすぐそばで光るので弱める(林の木の上側が白く、雪のように見えた)
 
 # 雨: 筋ごとに落ちて、見える範囲の下まで行ったら上に戻る
+RAIN_OPACITY = 0.10  # 01_generate_sceneと同じ
 RAIN_SPEED = 9.0  # 落ちる速さ[m/s](大きな雨粒)
 
 # 写真の質感(ep4と同じ)
@@ -159,7 +161,7 @@ def build_compositor(scene, clear=False):
     ng.links.new(grain.outputs['Result'], out.inputs['Image'])
 
 
-STRIKES = (("Lightning", STRIKE_FRAME), ("TreeLightning", TREE_STRIKE_FRAME))  # (雷のコレクション, 落ちるフレーム)
+STRIKES = (("Lightning", STRIKE_FRAME), ("Lightning", REPLAY_FRAME), ("TreeLightning", TREE_STRIKE_FRAME))  # (雷のコレクション, 落ちるフレーム)。2つ目は同じ雷のリプレイ
 
 
 def flash_amount(frame, strike=STRIKE_FRAME):
@@ -168,15 +170,17 @@ def flash_amount(frame, strike=STRIKE_FRAME):
 
 def apply_flash(scene, frame):
     """雷の閃光: 雷の道を見せ、点光源を点け、空を明るくする(車と杉の2回)。"""
-    sky = 0.0
+    flashes = {}
     for name, strike in STRIKES:
-        flash = flash_amount(frame, strike)
+        flashes[name] = max(flashes.get(name, 0.0), flash_amount(frame, strike))
+    sky = 0.0
+    for name, flash in flashes.items():
         col = bpy.data.collections.get(name)
         if col is not None:
             col.hide_render = flash <= 0.0
         light = bpy.data.lights.get(f"{name}Glow")
         if light is not None:
-            light.energy = FLASH_LIGHT * flash
+            light.energy = FLASH_LIGHT * FLASH_LIGHT_SCALE.get(name, 1.0) * flash
         sky = max(sky, flash)
     node = scene.world.node_tree.nodes.get("SkyStrength")
     if node is not None:
@@ -196,7 +200,7 @@ FALL_START_SPEED = 0.06  # [rad/s]。着地は約4.1秒後(800フレームごろ
 FALL_LAND_DEG = 92.0  # 枝が地面に着く角度
 BOUNCE_DEG = 4.0  # 着いたときの跳ね返り
 STEAM_DENSITY = 4.0
-STEAM_FADE = 2.5  # 蒸気が薄れる時間[s]
+STEAM_FADE = 1.5  # 蒸気が薄れる時間[s](長いと塊が丸い玉のまま残る)
 SCAR_GLOW = 3.0  # 裂けた跡が熱で赤く光る強さ(すぐ消える)
 
 
@@ -287,8 +291,9 @@ SCIENCE_VALUE = 0.35  # 科学の目の時間の明るさ
 CURRENT_STRENGTH = 8.0  # 電流の筋の光の強さ(強いとにじんで太い帯になる)
 
 
-def apply_science(scene, amount, lines=0.0):
-    """科学の目で見る時間: amount(0〜1)で画面の色を抜いて暗くし、lines(0〜1)で電流の筋を出す。"""
+def apply_science(scene, amount, lines=0.0, front=None):
+    """科学の目で見る時間: amount(0〜1)で画面の色を抜いて暗くし、lines(0〜1)で電流の筋を出す。
+    frontは筋の先端(落雷点からの道のり[m])。省略すると全部出す(確認用の静止画)。"""
     node = scene.compositing_node_group.nodes.get("Science")
     if node is not None:
         node.inputs['Saturation'].default_value = 1.0 + (SCIENCE_SATURATION - 1.0) * amount
@@ -298,16 +303,92 @@ def apply_science(scene, amount, lines=0.0):
         col.hide_render = lines <= 0.0
         mat = bpy.data.materials.get("CurrentLine")
         if mat is not None:
-            mat.node_tree.nodes["Emission"].inputs['Strength'].default_value = CURRENT_STRENGTH * lines
+            nodes = mat.node_tree.nodes
+            nodes["Emission"].inputs['Strength'].default_value = CURRENT_STRENGTH * lines
+            nodes["Front"].outputs[0].default_value = mat.get("length", 10.0) + 1.0 if front is None else front
+
+
+# 3a(科学の目)の仮の流れ。巻き戻し・スローは「区間ごとの動き」で足す
+SCIENCE_IN = (181, 211)  # 暗く色を抜く
+SCIENCE_OUT = (511, 540)  # 色を戻す
+CURRENT_GROW = (226, 346)  # 筋の先端が落雷点から接地点まで進む
+CURRENT_FLOW_SPEED = 0.25  # 筋の明暗が流れる速さ[m/s](電流の向きを見せる)
+RIPPLE_GROW = 0.9  # 路面の光が広がる時間[s]
+RIPPLE_FADE = 3.0  # 薄れる時間[s]
+RIPPLE_STRENGTH = 2.0
+RIPPLE_REACH = 1.3  # 広がる半径[m](大きく明るい輪はSFの円盤に見える)
+
+
+def smooth(x, a, b):
+    t = min(max((x - a) / (b - a), 0.0), 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def apply_current(scene, frame):
+    """科学の目の時間: 画面を暗くし、電流の筋が屋根から伸びてピラーに集まり、タイヤを回って接地点へ。
+    接地点に着いた車輪から、濡れた路面に光が広がって消える。"""
+    amount = smooth(frame, *SCIENCE_IN) * (1.0 - smooth(frame, *SCIENCE_OUT))
+    mat = bpy.data.materials.get("CurrentLine")
+    length = mat.get("length", 3.5) if mat is not None else 3.5
+    g0, g1 = CURRENT_GROW
+    front = (frame - g0) / (g1 - g0) * length
+    lines = (1.0 if front > 0 else 0.0) * (1.0 - smooth(frame, *SCIENCE_OUT))
+    apply_science(scene, amount, lines, front)
+    if mat is not None:
+        mat.node_tree.nodes["Phase"].outputs[0].default_value = CURRENT_FLOW_SPEED * frame / FPS
+    speed = length / (g1 - g0)  # [m/フレーム]
+    for o in bpy.data.objects:
+        if not o.name.startswith("CurrentRipple"):
+            continue
+        t = (front - o["arrive"]) / speed / FPS  # 着いてからの時間[s]
+        o["ripple_r"] = 0.1 + (RIPPLE_REACH - 0.1) * (1.0 - math.exp(-max(t, 0.0) / RIPPLE_GROW))
+        o["ripple_fade"] = RIPPLE_STRENGTH * lines * (1.0 - math.exp(-t / 0.1)) * math.exp(-t / RIPPLE_FADE) if t > 0 else 0.0
+
+
+def frozen(frame):
+    """2発目が落ちた次のフレームから3aの終わりまで、絵は止まる(雨粒・雷の閃光)。そのあいだはFREEZE_FRAMEの状態を返す。"""
+    return FREEZE_FRAME if FREEZE_FRAME <= frame <= FREEZE_END else frame
+
+
+def camera_state(frame):
+    """CAMERA_KEYSをなめらかにつないだ、カメラの位置・見る点・レンズ。"""
+    keys = CAMERA_KEYS
+    if frame <= keys[0][0]:
+        k = keys[0]
+        return Vector(k[1]), Vector(k[2]), k[3]
+    for (f0, l0, t0, n0), (f1, l1, t1, n1) in zip(keys, keys[1:]):
+        if frame <= f1:
+            u = smooth(frame, f0, f1)
+            return Vector(l0).lerp(Vector(l1), u), Vector(t0).lerp(Vector(t1), u), n0 + (n1 - n0) * u
+    k = keys[-1]
+    return Vector(k[1]), Vector(k[2]), k[3]
+
+
+def apply_camera(scene, frame):
+    loc, target, lens = camera_state(frame)
+    cam = scene.camera
+    cam.location = loc
+    cam.rotation_euler = (target - loc).normalized().to_track_quat('-Z', 'Y').to_euler()
+    cam.data.lens = lens
+    cam.data.dof.focus_distance = (target - loc).length
+    rain = bpy.data.materials.get("Rain")
+    if rain is not None:
+        amount = (1.0 - smooth(frame, *RAIN_HIDE)) + smooth(frame, *RAIN_SHOW)
+        next(n for n in rain.node_tree.nodes if n.type == 'MIX_SHADER').inputs['Fac'].default_value = RAIN_OPACITY * min(amount, 1.0)
+        obj = bpy.data.objects.get("Rain")
+        if obj is not None:
+            obj.hide_render = amount <= 0.0
 
 
 def apply_frame(scene, frame):
-    animate_rain(frame)
+    apply_camera(scene, frame)
+    animate_rain(frozen(frame))
     grain = scene.compositing_node_group.nodes.get("GrainNoise")
     if grain is not None:
         grain.inputs['W'].default_value = frame * 1.37
-    apply_flash(scene, frame)
+    apply_flash(scene, frozen(frame))
     apply_tree(frame)
+    apply_current(scene, frame)
     scene.frame_set(frame)
 
 
