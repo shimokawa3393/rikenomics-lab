@@ -26,6 +26,8 @@ FRAMES_DIR = os.path.join(EP5, "frames")
 TEXTURE_DIR = os.path.join(EP5, "textures")
 SKY_HDRI = os.path.join(TEXTURE_DIR, "overcast_soil_puresky_8k.hdr")  # Poly Haven(CC0)
 ASPHALT = {k: os.path.join(TEXTURE_DIR, f"asphalt_01_{k}_2k.jpg") for k in ("diff", "rough", "nor_gl")}  # Poly Haven(CC0)
+GRASS_TEX = {k: os.path.join(TEXTURE_DIR, f"aerial_grass_rock_{k}_2k.jpg") for k in ("diff", "rough", "nor_gl")}  # Poly Haven(CC0)
+SOIL_TEX = {k: os.path.join(TEXTURE_DIR, f"forest_ground_04_{k}_2k.jpg") for k in ("diff", "rough", "nor_gl")}  # Poly Haven(CC0)
 
 # --- 車(セダン)。横から見た形: 後端 y=0 → 前端 y=LENGTH、z=高さ ---
 CAR_LENGTH = 4.78

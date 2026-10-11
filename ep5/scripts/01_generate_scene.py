@@ -23,7 +23,7 @@ from mathutils import noise
 from mathutils.bvhtree import BVHTree
 from shots import (
     ARCH_RADIUS, ASPHALT, ROOF_Z, SCREEN_HALF_TOP, AXLES_Y, B_PILLAR, BELT, CAM_LENS, CAM_LOC, CAM_TARGET, CAR_LENGTH, CAR_PROFILE,
-    CAR_WIDTH, LINE_WIDTH, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
+    CAR_WIDTH, GRASS_TEX, LINE_WIDTH, SOIL_TEX, LOT_HALF, NOSE_TAPER, ROOF_TAPER, SCREEN_HALF, SIDE_WINDOW_BOTTOM,
     SIDE_WINDOW_INSET_A, SIDE_WINDOW_INSET_C, SIDE_WINDOW_TOP, WINDOW_KICK, SLOT_LENGTH, SLOT_WIDTH, TAPER_ZONE,
     WHEEL_RADIUS, WHEEL_WIDTH, WIP_BLEND,
 )
@@ -682,7 +682,24 @@ def build_ground(col):
     return lot
 
 
+GROUND_TINT = (0.26, 0.40, 0.25, 1.0)  # 草地・土の写真にかける色(濡れて暗く、曇天で彩度が落ちる)
+ROLL_AMP = 9.0  # 谷底の起伏の大きさ[m]
+
+
+def rolling_height(x, y):
+    """谷底のゆるい起伏: 駐車場のすぐ外は平らで、離れるほど数mの丘やくぼみが出る。"""
+    d = max(abs(x) - LOT_HALF[0], abs(y) - LOT_HALF[1], 0.0)  # 駐車場の縁からの距離
+    t = min(max((d - 8.0) / 180.0, 0.0), 1.0)
+    amp = ROLL_AMP * t * t * (3 - 2 * t)
+    n = noise.fractal(V((x / 140.0, y / 140.0, 2.7)), 1.0, 2.0, 3)
+    return amp * (0.6 + n)
+
+
 def terrain_height(x, y):
+    return mountain_height(x, y) + rolling_height(x, y) - 0.03  # 駐車場の面(z=0)と重ならないよう少し下げる
+
+
+def mountain_height(x, y):
     """谷の形: 駐車場のまわりは平ら。谷の軸(カメラの視線の向き)から横へ離れるほど山が高くなり、奥でも上がる。"""
     ax = V((-0.47, -0.88)).normalized()
     p = V((x, y))
@@ -697,6 +714,127 @@ def terrain_height(x, y):
     h = base * (0.80 + 0.30 * n)
     near = math.hypot(x, y)
     return 0.0 if near < flat else h * min(1.0, (near - flat) / 200.0) - 0.05
+
+
+def forest_material():
+    """木に覆われた山肌: 遠目に見える樹冠の粒(明るい梢と暗いすき間)、大きな色むら、急な所は岩っぽく。"""
+    mat = bpy.data.materials.new("Forest")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(nd for nd in nt.nodes if nd.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Roughness'].default_value = 0.9
+    geo = nt.nodes.new('ShaderNodeNewGeometry')
+    # 樹冠の粒(1本 ≒ 6m)
+    crown = nt.nodes.new('ShaderNodeTexVoronoi')
+    crown.feature = 'DISTANCE_TO_EDGE'
+    crown.inputs['Scale'].default_value = 1.0 / 14.0  # 遠目に見える木の塊(数本ずつ)
+    nt.links.new(geo.outputs['Position'], crown.inputs['Vector'])
+    gap = nt.nodes.new('ShaderNodeMapRange')  # 縁(すき間)ほど暗い
+    gap.inputs['From Max'].default_value = 0.30
+    gap.inputs['To Min'].default_value = 0.25
+    gap.inputs['To Max'].default_value = 1.0
+    nt.links.new(crown.outputs['Distance'], gap.inputs['Value'])
+    # 大きな色むら(針葉樹の濃い緑と、広葉樹の明るい緑のまだら)
+    patch = nt.nodes.new('ShaderNodeTexNoise')
+    patch.inputs['Scale'].default_value = 1.0 / 120.0
+    patch.inputs['Detail'].default_value = 6.0
+    nt.links.new(geo.outputs['Position'], patch.inputs['Vector'])
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].position = 0.35
+    ramp.color_ramp.elements[0].color = (FOREST[0], FOREST[1], FOREST[2], 1)
+    ramp.color_ramp.elements[1].position = 0.65
+    ramp.color_ramp.elements[1].color = (FOREST[0] * 2.6, FOREST[1] * 2.1, FOREST[2] * 1.4, 1)
+    nt.links.new(patch.outputs['Fac'], ramp.inputs['Fac'])
+    col = nt.nodes.new('ShaderNodeMix')
+    col.data_type = 'RGBA'
+    col.blend_type = 'MULTIPLY'
+    col.inputs['Factor'].default_value = 1.0
+    nt.links.new(ramp.outputs['Color'], col.inputs['A'])
+    nt.links.new(gap.outputs['Result'], col.inputs['B'])
+    # 急な斜面は木がまばらで岩が見える
+    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(geo.outputs['Normal'], sep.inputs['Vector'])
+    steep = nt.nodes.new('ShaderNodeMapRange')
+    steep.inputs['From Min'].default_value = 0.80
+    steep.inputs['From Max'].default_value = 0.62
+    nt.links.new(sep.outputs['Z'], steep.inputs['Value'])
+    rock = nt.nodes.new('ShaderNodeMix')
+    rock.data_type = 'RGBA'
+    rock.inputs['B'].default_value = (0.045, 0.045, 0.042, 1)
+    nt.links.new(steep.outputs['Result'], rock.inputs['Factor'])
+    nt.links.new(col.outputs['Result'], rock.inputs['A'])
+    # 谷底(低い所)は草地。起伏のある谷底から山の木の色へなめらかに移る
+    sepp = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(geo.outputs['Position'], sepp.inputs['Vector'])
+    low = nt.nodes.new('ShaderNodeMapRange')
+    low.inputs['From Min'].default_value = 10.0
+    low.inputs['From Max'].default_value = 25.0
+    low.inputs['To Min'].default_value = 1.0
+    low.inputs['To Max'].default_value = 0.0
+    nt.links.new(sepp.outputs['Z'], low.inputs['Value'])
+    # 草地と土の写真(Poly Haven)をワールド座標で貼り、ノイズで土のまだらを混ぜる
+    def photo(paths, tile):
+        mapping = nt.nodes.new('ShaderNodeMapping')
+        mapping.inputs['Scale'].default_value = (1.0 / tile, 1.0 / tile, 1.0)
+        nt.links.new(geo.outputs['Position'], mapping.inputs['Vector'])
+        out = {}
+        for k in ("diff", "rough", "nor_gl"):
+            t = nt.nodes.new('ShaderNodeTexImage')
+            t.image = bpy.data.images.load(paths[k], check_existing=True)
+            if k != "diff":
+                t.image.colorspace_settings.name = 'Non-Color'
+            nt.links.new(mapping.outputs['Vector'], t.inputs['Vector'])
+            out[k] = t
+        return out
+    g, d = photo(GRASS_TEX, 14.0), photo(SOIL_TEX, 5.0)
+    soil_noise = nt.nodes.new('ShaderNodeTexNoise')
+    soil_noise.inputs['Scale'].default_value = 1.0 / 35.0
+    soil_noise.inputs['Detail'].default_value = 5.0
+    nt.links.new(geo.outputs['Position'], soil_noise.inputs['Vector'])
+    soil = nt.nodes.new('ShaderNodeMapRange')  # 土が出ている所(2割ほど)
+    soil.inputs['From Min'].default_value = 0.58
+    soil.inputs['From Max'].default_value = 0.64
+    nt.links.new(soil_noise.outputs['Fac'], soil.inputs['Value'])
+
+    def mix(kind, a, b):
+        m = nt.nodes.new('ShaderNodeMix')
+        m.data_type = kind
+        nt.links.new(soil.outputs['Result'], m.inputs['Factor'])
+        nt.links.new(a, m.inputs['A'])
+        nt.links.new(b, m.inputs['B'])
+        return m.outputs['Result']
+    ground = mix('RGBA', g['diff'].outputs['Color'], d['diff'].outputs['Color'])
+    wet = nt.nodes.new('ShaderNodeMix')  # 雨で濡れて暗く、曇天で彩度も落ちる
+    wet.data_type = 'RGBA'
+    wet.blend_type = 'MULTIPLY'
+    wet.inputs['Factor'].default_value = 1.0
+    wet.inputs['B'].default_value = GROUND_TINT
+    nt.links.new(ground, wet.inputs['A'])
+    grass = nt.nodes.new('ShaderNodeMix')
+    grass.data_type = 'RGBA'
+    nt.links.new(low.outputs['Result'], grass.inputs['Factor'])
+    nt.links.new(rock.outputs['Result'], grass.inputs['A'])
+    nt.links.new(wet.outputs['Result'], grass.inputs['B'])
+    nt.links.new(grass.outputs['Result'], bsdf.inputs['Base Color'])
+    rough = mix('FLOAT', g['rough'].outputs['Color'], d['rough'].outputs['Color'])
+    r_low = nt.nodes.new('ShaderNodeMix')
+    r_low.inputs['A'].default_value = 0.9
+    nt.links.new(low.outputs['Result'], r_low.inputs['Factor'])
+    nt.links.new(rough, r_low.inputs['B'])
+    nt.links.new(r_low.outputs['Result'], bsdf.inputs['Roughness'])
+    bump = nt.nodes.new('ShaderNodeBump')  # 樹冠の凹凸
+    bump.inputs['Strength'].default_value = 0.7
+    nt.links.new(crown.outputs['Distance'], bump.inputs['Height'])
+    nmap = nt.nodes.new('ShaderNodeNormalMap')  # 谷底は草地・土の写真の凹凸
+    nmap.inputs['Strength'].default_value = 0.8
+    nt.links.new(mix('RGBA', g['nor_gl'].outputs['Color'], d['nor_gl'].outputs['Color']), nmap.inputs['Color'])
+    n_mix = nt.nodes.new('ShaderNodeMix')
+    n_mix.data_type = 'VECTOR'
+    nt.links.new(low.outputs['Result'], n_mix.inputs['Factor'])
+    nt.links.new(bump.outputs['Normal'], n_mix.inputs['A'])
+    nt.links.new(nmap.outputs['Normal'], n_mix.inputs['B'])
+    nt.links.new(n_mix.outputs['Result'], bsdf.inputs['Normal'])
+    return mat
 
 
 def build_terrain(col):
@@ -719,59 +857,109 @@ def build_terrain(col):
             bm.faces.new((verts[j][i], verts[j][i + 1], verts[j + 1][i + 1], verts[j + 1][i]))
     for f in bm.faces:
         f.smooth = True
-    mat = bpy.data.materials.new("Forest")
-    mat.use_nodes = True
-    nt = mat.node_tree
-    bsdf = next(nd for nd in nt.nodes if nd.type == 'BSDF_PRINCIPLED')
-    bsdf.inputs['Roughness'].default_value = 0.9
-    coord = nt.nodes.new('ShaderNodeTexCoord')
-    tex = nt.nodes.new('ShaderNodeTexNoise')
-    tex.inputs['Scale'].default_value = 0.02
-    tex.inputs['Detail'].default_value = 10.0
-    nt.links.new(coord.outputs['Object'], tex.inputs['Vector'])
-    ramp = nt.nodes.new('ShaderNodeValToRGB')
-    ramp.color_ramp.elements[0].color = (*FOREST, 1)
-    ramp.color_ramp.elements[1].color = (FOREST[0] * 2.2, FOREST[1] * 2.0, FOREST[2] * 1.6, 1)
-    nt.links.new(tex.outputs['Fac'], ramp.inputs['Fac'])
-    nt.links.new(ramp.outputs['Color'], bsdf.inputs['Base Color'])
-    # 木の凹凸(細かいバンプ)
-    bump_tex = nt.nodes.new('ShaderNodeTexVoronoi')
-    bump_tex.inputs['Scale'].default_value = 0.25
-    nt.links.new(coord.outputs['Object'], bump_tex.inputs['Vector'])
-    bump = nt.nodes.new('ShaderNodeBump')
-    bump.inputs['Strength'].default_value = 0.6
-    nt.links.new(bump_tex.outputs['Distance'], bump.inputs['Height'])
-    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    mat = forest_material()
     mesh_object("Terrain", bm, [mat], col)
-    # 駐車場の外の平らなところ(草)
+
+
+TRUNK_CLEAR = 0.20  # 下の枝が始まる高さ(木の高さに対する割合)。根元まで葉があると幹が見えず、のっぺりする
+
+
+def conifer_mesh():
+    """後ろの森の針葉樹(高さ1)。ギザギザの枝の段を7段重ね、縁を垂らして、ノイズで形を崩す。"""
     bm = bmesh.new()
-    bmesh.ops.create_grid(bm, x_segments=1, y_segments=1, size=1.0, matrix=mathutils.Matrix.Diagonal((400, 400, 1, 1)))
+    tiers = 7
+    for k in range(tiers):
+        t = k / tiers
+        z0 = TRUNK_CLEAR + (0.92 - TRUNK_CLEAR) * t
+        r = 0.34 * (1.0 - t) ** 0.9 + 0.04
+        h = 0.26 * (1.0 - 0.5 * t)
+        n = 24
+        ring = []
+        for i in range(n):
+            a = 2 * math.pi * (i + 0.5 * (k % 2)) / n
+            rr = r * (1.0 if i % 2 == 0 else 0.62)  # 枝先と枝のあいだ(星形)
+            ring.append(bm.verts.new((rr * math.cos(a), rr * math.sin(a), z0 - (0.04 if i % 2 == 0 else 0.0))))
+        tip = bm.verts.new((0, 0, z0 + h))
+        for i in range(n):
+            bm.faces.new((ring[i], ring[(i + 1) % n], tip))
+        bm.faces.new(list(reversed(ring)))
     for v in bm.verts:
-        v.co.z = -0.02
-    mesh_object("Grass", bm, [principled("Grass", GRASS, roughness=0.85)], col)
-
-
-def build_trees(col, rng):
-    """駐車場の外の針葉樹。円錐を2段重ねた形のリンク複製。"""
-    mat = principled("Conifer", (0.012, 0.024, 0.014), roughness=0.9)
-    bm = bmesh.new()
-    for z0, r, h in ((0.15, 0.45, 0.55), (0.45, 0.33, 0.45), (0.70, 0.2, 0.30)):
-        bmesh.ops.create_cone(bm, cap_ends=True, segments=10, radius1=r, radius2=0.0, depth=h,
-                              matrix=mathutils.Matrix.Translation((0, 0, z0 + h / 2)))
-    bmesh.ops.create_cone(bm, cap_ends=True, segments=6, radius1=0.03, radius2=0.03, depth=0.2,
-                          matrix=mathutils.Matrix.Translation((0, 0, 0.1)))
+        d = noise.noise_vector(v.co * 6.0)
+        v.co += d * 0.025 * (0.3 + v.co.length)
+    for f in bm.faces:
+        f.smooth = True  # 近くで面の角が目立たないように
+    before = set(bm.faces)
+    bmesh.ops.create_cone(bm, cap_ends=True, segments=10, radius1=0.022, radius2=0.012, depth=TRUNK_CLEAR + 0.08,
+                          matrix=mathutils.Matrix.Translation((0, 0, (TRUNK_CLEAR + 0.08) / 2)))
+    for f in bm.faces:
+        if f not in before:
+            f.material_index = 1  # 幹
     me = bpy.data.meshes.new("Conifer")
     bm.to_mesh(me)
     bm.free()
-    me.materials.append(mat)
+    return me
+
+
+def conifer_material():
+    """後ろの森の葉: 木ごとに色を少し変え、葉の塊のまだらを入れる。"""
+    mat = bpy.data.materials.new("Conifer")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Roughness'].default_value = 0.85
+    info = nt.nodes.new('ShaderNodeObjectInfo')
+    ramp = nt.nodes.new('ShaderNodeValToRGB')  # 木ごとの色(濃い緑〜少し青みの緑〜少し黄みの緑)
+    ramp.color_ramp.elements[0].color = (0.010, 0.022, 0.013, 1)
+    ramp.color_ramp.elements[1].color = (0.022, 0.036, 0.018, 1)
+    ramp.color_ramp.elements.new(0.5).color = (0.012, 0.030, 0.022, 1)
+    nt.links.new(info.outputs['Random'], ramp.inputs['Fac'])
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    vor = nt.nodes.new('ShaderNodeTexVoronoi')  # 葉の塊
+    vor.inputs['Scale'].default_value = 9.0
+    nt.links.new(coord.outputs['Object'], vor.inputs['Vector'])
+    shade = nt.nodes.new('ShaderNodeMapRange')
+    shade.inputs['To Min'].default_value = 1.0
+    shade.inputs['To Max'].default_value = 0.45
+    nt.links.new(vor.outputs['Distance'], shade.inputs['Value'])
+    mul = nt.nodes.new('ShaderNodeMix')
+    mul.data_type = 'RGBA'
+    mul.blend_type = 'MULTIPLY'
+    mul.inputs['Factor'].default_value = 1.0
+    nt.links.new(ramp.outputs['Color'], mul.inputs['A'])
+    nt.links.new(shade.outputs['Result'], mul.inputs['B'])
+    nt.links.new(mul.outputs['Result'], bsdf.inputs['Base Color'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 0.8
+    nt.links.new(vor.outputs['Distance'], bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    return mat
+
+
+def in_camera_view(x, y, margin_deg=6.0):
+    cam = V(CAM_LOC)
+    fwd = (V(CAM_TARGET) - cam).to_2d().normalized()
+    d = V((x, y)) - cam.to_2d()
+    half_h = math.degrees(math.atan(math.tan(math.atan(18.0 / CAM_LENS)) * 1080 / 1920))
+    return math.degrees(fwd.angle(d.normalized())) < half_h + margin_deg
+
+
+NEAR_TREE = 75.0  # 木を植える一番近い距離(駐車場のすぐ外。遠すぎると手前に何もない草地が広がる)
+GROVES = 26  # カメラに映る範囲に足す木立の数(1つ5本ほど)
+
+
+def build_trees(col, rng):
+    """駐車場の外の針葉樹(自作の木のリンク複製)。壁にならないよう、木立のあいだに奥が見えるすき間を残す。"""
+    me = conifer_mesh()
+    me.materials.append(conifer_material())
+    me.materials.append(principled("ConiferTrunk", (0.022, 0.020, 0.018), roughness=0.9))
     count = 0
     for _ in range(4000):
-        r = rng.uniform(110.0, 700.0)
+        r = rng.uniform(NEAR_TREE, 700.0)
         a = rng.uniform(0, 2 * math.pi)
         x, y = r * math.cos(a), r * math.sin(a)
         if abs(x) < LOT_HALF[0] + 3 and abs(y) < LOT_HALF[1] + 3:
             continue
-        if terrain_height(x, y) > 1.0:
+        if mountain_height(x, y) > 1.0:
             continue
         # 谷の奥(視線の先)は開けておく
         ang = math.degrees(math.atan2(y, x))
@@ -780,12 +968,135 @@ def build_trees(col, rng):
         o = link(bpy.data.objects.new(f"Tree{count:04d}", me), col)
         s = rng.uniform(12.0, 22.0)
         o.scale = (s * rng.uniform(0.8, 1.1), s * rng.uniform(0.8, 1.1), s)
-        o.location = (x, y, 0)
+        o.location = (x, y, terrain_height(x, y) - 0.5)
         o.rotation_euler = (0, 0, rng.uniform(0, 6.3))
         count += 1
-        if count >= 1500:
+        if count >= 1000:
             break
-    print("[Stage1] trees:", count)
+    # カメラに映る範囲に木立を足す。数本ずつの塊にして、塊のあいだから奥が見えるようにする(密に植えると壁になる)
+    dense = 0
+    groves = []
+    for _ in range(20000):
+        r = NEAR_TREE + 520.0 * rng.random() ** 1.6
+        a = rng.uniform(0, 2 * math.pi)
+        x, y = r * math.cos(a), r * math.sin(a)
+        if in_camera_view(x, y, 10.0) and terrain_height(x, y) < 60.0:
+            groves.append((x, y))
+        if len(groves) >= GROVES:
+            break
+    for _ in range(20000):
+        gx, gy = groves[rng.randrange(len(groves))]
+        x, y = gx + rng.gauss(0, 7.0), gy + rng.gauss(0, 7.0)
+        h = terrain_height(x, y)
+        if (abs(x) < LOT_HALF[0] + 4 and abs(y) < LOT_HALF[1] + 4) or h > 60.0:
+            continue
+        ang = math.degrees(math.atan2(y, x))
+        if -125 < ang < -100 and r < 300:
+            continue
+        o = link(bpy.data.objects.new(f"TreeDense{dense:04d}", me), col)
+        s = rng.uniform(13.0, 24.0) * min(1.0, 0.6 + 0.4 * (math.hypot(x, y) - NEAR_TREE) / 60.0)  # 近いほど低い木(大きく映りすぎない)
+        o.scale = (s * rng.uniform(0.8, 1.1), s * rng.uniform(0.8, 1.1), s)
+        o.location = (x, y, max(h, 0.0) - 0.5)
+        o.rotation_euler = (0, 0, rng.uniform(0, 6.3))
+        dense += 1
+        if dense >= GROVES * 5:
+            break
+    print("[Stage1] trees:", count, "groves:", dense)
+
+
+BUSHES = 70  # 草地に置く低い茂みの数(カメラに映る範囲だけ)。草の株は、遠目だと虫の群れに見えたので置かない
+
+
+def bush_mesh():
+    """低い茂み(直径1): 小さな葉の塊を十数個寄せ、細かくゆがめて縁をギザギザにする(なめらかな半球だと石に見える)。"""
+    bm = bmesh.new()
+    r_ = random.Random(11)
+    for _ in range(14):
+        a = r_.uniform(0, 2 * math.pi)
+        d = r_.uniform(0.0, 0.38)
+        r = r_.uniform(0.14, 0.26)
+        c = (d * math.cos(a), d * math.sin(a), r_.uniform(0.15, 0.45) * (1.0 - d))
+        bmesh.ops.create_icosphere(bm, subdivisions=2, radius=r, matrix=mathutils.Matrix.Translation(c))
+    for v in bm.verts:
+        v.co += noise.noise_vector(v.co * 9.0) * 0.06 + noise.noise_vector(v.co * 25.0) * 0.025
+        v.co.z = max(v.co.z, 0.0)
+    me = bpy.data.meshes.new("Bush")
+    bm.to_mesh(me)
+    bm.free()
+    return me
+
+
+def plant_material(name, dark, light):
+    """草・茂みの色: 1つずつ色を変え(Object Infoの乱数)、根元ほど暗くする。"""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs['Roughness'].default_value = 0.8
+    info = nt.nodes.new('ShaderNodeObjectInfo')
+    ramp = nt.nodes.new('ShaderNodeValToRGB')
+    ramp.color_ramp.elements[0].color = (*dark, 1)
+    ramp.color_ramp.elements[1].color = (*light, 1)
+    nt.links.new(info.outputs['Random'], ramp.inputs['Fac'])
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+    nt.links.new(coord.outputs['Generated'], sep.inputs['Vector'])
+    ao = nt.nodes.new('ShaderNodeMapRange')  # 根元(下)ほど暗い
+    ao.inputs['To Min'].default_value = 0.35
+    nt.links.new(sep.outputs['Z'], ao.inputs['Value'])
+    mul = nt.nodes.new('ShaderNodeMix')
+    mul.data_type = 'RGBA'
+    mul.blend_type = 'MULTIPLY'
+    mul.inputs['Factor'].default_value = 1.0
+    nt.links.new(ramp.outputs['Color'], mul.inputs['A'])
+    nt.links.new(ao.outputs['Result'], mul.inputs['B'])
+    leaf = nt.nodes.new('ShaderNodeTexVoronoi')  # 葉の粒: 明るい葉と暗いすき間
+    leaf.inputs['Scale'].default_value = 28.0
+    nt.links.new(coord.outputs['Object'], leaf.inputs['Vector'])
+    gap = nt.nodes.new('ShaderNodeMapRange')
+    gap.inputs['From Max'].default_value = 0.5
+    gap.inputs['To Min'].default_value = 1.3
+    gap.inputs['To Max'].default_value = 0.4
+    nt.links.new(leaf.outputs['Distance'], gap.inputs['Value'])
+    mul2 = nt.nodes.new('ShaderNodeMix')
+    mul2.data_type = 'RGBA'
+    mul2.blend_type = 'MULTIPLY'
+    mul2.inputs['Factor'].default_value = 1.0
+    nt.links.new(mul.outputs['Result'], mul2.inputs['A'])
+    nt.links.new(gap.outputs['Result'], mul2.inputs['B'])
+    nt.links.new(mul2.outputs['Result'], bsdf.inputs['Base Color'])
+    bump = nt.nodes.new('ShaderNodeBump')
+    bump.inputs['Strength'].default_value = 1.0
+    nt.links.new(leaf.outputs['Distance'], bump.inputs['Height'])
+    nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+    bsdf.inputs['Roughness'].default_value = 0.9
+    return mat
+
+
+def build_ground_plants(col, rng):
+    """駐車場と林のあいだの草地に、低い茂みを散らす(軽い形のリンク複製。カメラに映る範囲だけ)。"""
+    bush = bush_mesh()
+    bush.materials.append(plant_material("Bush", (0.018, 0.035, 0.012), (0.045, 0.065, 0.020)))
+    placed = {"bush": 0}
+    for kind, me, total, size in (("bush", bush, BUSHES, (0.8, 1.8)),):
+        for _ in range(total * 20):
+            r = 20.0 + 140.0 * rng.random() ** 1.3
+            a = rng.uniform(0, 2 * math.pi)
+            x, y = r * math.cos(a), r * math.sin(a)
+            edge = 8.0  # 茂みが駐車場の縁に並ぶと生け垣に見える
+            if abs(x) < LOT_HALF[0] + edge and abs(y) < LOT_HALF[1] + edge:
+                continue
+            if not in_camera_view(x, y, 5.0) or mountain_height(x, y) > 1.0:
+                continue
+            o = link(bpy.data.objects.new(f"{kind}{placed[kind]:04d}", me), col)
+            sc = rng.uniform(*size)
+            o.scale = (sc * rng.uniform(0.8, 1.3), sc * rng.uniform(0.8, 1.3), sc)
+            o.location = (x, y, terrain_height(x, y) - 0.05)
+            o.rotation_euler = (0, 0, rng.uniform(0, 6.3))
+            placed[kind] += 1
+            if placed[kind] >= total:
+                break
+    print("[Stage1] ground plants:", placed)
 
 
 def build_rain(col, rng):
@@ -853,6 +1164,7 @@ def main():
     build_ground(collection("Ground"))
     build_terrain(collection("Terrain"))
     build_trees(collection("Trees"), rng)
+    build_ground_plants(collection("GroundPlants"), rng)
     build_car(collection("Car"))
     build_camera(collection("Camera"))
     build_rain(collection("Rain"), rng)
